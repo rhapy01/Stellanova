@@ -1,0 +1,21 @@
+[package]
+name = "nftgram-marketplace"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[profile.release]
+overflow-checks = true
+
+[package.metadata.stellar]
+cargo_inherit = true
+
+[dependencies]
+soroban-sdk = "28.0.0"
+
+[dev-dependencies]
+soroban-sdk = { version = "28.0.0", features = ["testutils"] }

@@ -1,0 +1,53 @@
+{
+  "name": "stellanova",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "tsx server/index.ts",
+    "db:migrate": "tsx server/migrate.ts",
+    "build:nft-contract": "stellar contract build --manifest-path contracts/nft/Cargo.toml && node scripts/copy-nft-contract.js",
+    "build:marketplace-contract": "stellar contract build --manifest-path contracts/marketplace/Cargo.toml && node scripts/copy-marketplace-contract.js",
+    "seed:testnet:feed": "tsx scripts/seed-testnet-feed.ts",
+    "cleanup:testnet:feed": "tsx scripts/cleanup-testnet-feed.ts",
+    "scf:traction:audit": "tsx scripts/scf-traction-audit.ts",
+    "deploy:testnet": "tsx scripts/deploy-testnet.ts",
+    "redeploy:nft:testnet": "tsx scripts/redeploy-nft-testnet.ts",
+    "deploy:marketplace:testnet": "tsx scripts/deploy-marketplace-testnet.ts",
+    "build": "vite build",
+    "start": "NODE_ENV=production tsx server/index.ts",
+    "preview": "vite preview --host 0.0.0.0 --port 3000"
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.1148.0",
+    "@google/model-viewer": "^4.4.0",
+    "@privy-io/node": "^0.35.0",
+    "@privy-io/react-auth": "^3.48.1",
+    "@stellar/freighter-api": "^6.0.1",
+    "@stellar/stellar-sdk": "^17.2.1",
+    "@stripe/stripe-js": "^10.0.0",
+    "@vitejs/plugin-react": "latest",
+    "dotenv": "^18.0.6",
+    "express": "^5.2.1",
+    "fflate": "^0.8.3",
+    "multer": "^2.4.0",
+    "nodemailer": "^10.1.0",
+    "omggif": "^1.0.10",
+    "pg": "^8.23.1",
+    "react": "latest",
+    "react-dom": "latest",
+    "typescript": "latest",
+    "vite": "latest"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.6",
+    "@types/multer": "^2.3.0",
+    "@types/node": "^26.6.4",
+    "@types/nodemailer": "^8.0.2",
+    "@types/pg": "^8.23.1",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "tsx": "^4.23.15",
+    "wrangler": "^4.149.0"
+  }
+}
