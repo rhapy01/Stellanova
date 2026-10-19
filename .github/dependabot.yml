@@ -1,0 +1,22 @@
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: "/"
+    schedule:
+      interval: weekly
+  - package-ecosystem: cargo
+    directory: "/contracts/account"
+    schedule:
+      interval: weekly
+  - package-ecosystem: cargo
+    directory: "/contracts/nft"
+    schedule:
+      interval: weekly
+  - package-ecosystem: cargo
+    directory: "/contracts/marketplace"
+    schedule:
+      interval: weekly
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
