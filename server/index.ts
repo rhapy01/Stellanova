@@ -1011,6 +1011,75 @@ app.get('/api/nfts/minted', async (req, res) => {
   }
 })
 
+// Public NFT activity is built only from confirmed contract events indexed by
+// Soroban. Social reactions and off-chain marketplace records are deliberately
+// excluded from this timeline.
+app.get('/api/nfts/:contract/:tokenId/activity', async (req, res) => {
+  const contractId = String(req.params.contract ?? '').toUpperCase()
+  const tokenId = Number(req.params.tokenId)
+  if (!/^C[A-Z2-7]{55}$/.test(contractId) || !Number.isSafeInteger(tokenId) || tokenId < 0) {
+    return res.status(400).json({ error: 'A valid NFT contract and token ID are required' })
+  }
+  if (!databaseAvailable()) return res.status(503).json({ error: 'Confirmed NFT activity is not available' })
+  try {
+    await ensureSchema()
+    const [mintRows, eventRows] = await Promise.all([
+      query<{ minter: string; tx_hash: string; ledger: number }[]>(
+        'SELECT minter, tx_hash, ledger FROM verified_nft_mints WHERE LOWER(contract_id) = LOWER(?) AND token_id = ? LIMIT 1',
+        [contractId, tokenId],
+      ),
+      query<{ event_type: string; tx_hash: string; ledger: number; payload: { topics?: unknown; value?: unknown } }[]>(
+        `SELECT event_type, tx_hash, ledger, payload FROM marketplace_events
+         WHERE (LOWER(contract_id) = LOWER(?) AND event_type IN ('transfer', 'mint')
+                AND COALESCE(payload->'value'->>0, payload->'value' #>> '{}', '') = ?)
+            OR (event_type IN ('sale', 'offer_s', 'offer_sale', 'auc_s', 'auction_sale')
+                AND LOWER(COALESCE(payload->'value'->>3, '')) = LOWER(?)
+                AND COALESCE(payload->'value'->>4, '') = ?)
+         ORDER BY ledger ASC LIMIT 1000`,
+        [contractId, String(tokenId), contractId, String(tokenId)],
+      ),
+    ])
+    const activity: { kind: 'mint' | 'transfer' | 'sale'; tx_hash: string; ledger: number; from: string | null; to: string | null; amount_xlm: string | null }[] = []
+    const mint = mintRows[0]
+    if (mint) activity.push({ kind: 'mint', tx_hash: mint.tx_hash, ledger: mint.ledger, from: null, to: mint.minter, amount_xlm: null })
+    const eventData = (value: unknown): unknown[] => {
+      if (Array.isArray(value)) return value
+      if (value && typeof value === 'object' && Array.isArray((value as { values?: unknown }).values)) return (value as { values: unknown[] }).values
+      return [value]
+    }
+    const stringValue = (value: unknown) => typeof value === 'string' ? value : value == null ? '' : String(value)
+    const toXlm = (value: unknown): string | null => {
+      try {
+        const stroops = BigInt(stringValue(value))
+        const whole = stroops / 10_000_000n
+        const fraction = (stroops % 10_000_000n).toString().padStart(7, '0').replace(/0+$/, '')
+        return fraction ? `${whole}.${fraction}` : String(whole)
+      } catch { return null }
+    }
+    const saleTxs = new Set(eventRows.filter((event) => ['sale', 'offer_s', 'offer_sale', 'auc_s', 'auction_sale'].includes(event.event_type)).map((event) => event.tx_hash))
+    for (const event of eventRows) {
+      const values = eventData(event.payload?.value)
+      const topics = Array.isArray(event.payload?.topics) ? event.payload!.topics as unknown[] : []
+      if (['sale', 'offer_s', 'offer_sale', 'auc_s', 'auction_sale'].includes(event.event_type)) {
+        const nftContractIndex = 3
+        const tokenIndex = 4
+        if (stringValue(values[nftContractIndex]).toLowerCase() !== contractId.toLowerCase() || Number(values[tokenIndex]) !== tokenId) continue
+        activity.push({ kind: 'sale', tx_hash: event.tx_hash, ledger: event.ledger, from: stringValue(values[2]) || null, to: stringValue(values[1]) || null, amount_xlm: toXlm(values[5]) })
+        continue
+      }
+      if (event.event_type === 'mint') continue // represented by verified_nft_mints above
+      const tokenValue = Number(values[0])
+      if (event.event_type !== 'transfer' || tokenValue !== tokenId || saleTxs.has(event.tx_hash)) continue
+      activity.push({ kind: 'transfer', tx_hash: event.tx_hash, ledger: event.ledger, from: stringValue(topics[1]) || null, to: stringValue(topics[2]) || null, amount_xlm: null })
+    }
+    const unique = new Map<string, typeof activity[number]>()
+    for (const item of activity) unique.set(`${item.tx_hash}:${item.kind}`, item)
+    res.json({ activity: [...unique.values()].sort((a, b) => b.ledger - a.ledger) })
+  } catch (error) {
+    res.status(503).json({ error: error instanceof Error ? error.message : 'NFT activity query failed' })
+  }
+})
+
 // Public, shareable marketplace snapshot. Every value comes from confirmed
 // indexer/read-model records; keep projections separate to avoid join inflation.
 app.post('/api/analytics/social-event', async (req, res) => {

@@ -404,6 +404,22 @@ export type CollectionMintHistoryEntry = {
   stages: { stage_name: string; stage_minted: number }[]
 }
 
+export type NftChainActivityEntry = {
+  kind: 'mint' | 'transfer' | 'sale'
+  tx_hash: string
+  ledger: number
+  from: string | null
+  to: string | null
+  amount_xlm: string | null
+}
+
+export async function fetchNftChainActivity(contractId: string, tokenId: number): Promise<NftChainActivityEntry[]> {
+  const response = await fetch(`/api/nfts/${encodeURIComponent(contractId)}/${tokenId}/activity`)
+  const data = await response.json() as { activity?: NftChainActivityEntry[]; error?: string }
+  if (!response.ok) throw new Error(data.error || 'Unable to load NFT chain activity')
+  return data.activity ?? []
+}
+
 export async function fetchCollectionMintHistory(slug: string): Promise<CollectionMintHistoryEntry[]> {
   const response = await fetch(`/api/collections/${encodeURIComponent(slug)}/mint-history`)
   if (!response.ok) throw new Error('Unable to load collection mint history')

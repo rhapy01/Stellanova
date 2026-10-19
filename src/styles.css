@@ -2677,3 +2677,29 @@ h1, h2, h3, h4, h5, h6,
 .ops-dashboard__table code { font-size:11px; }
 .ops-dashboard__error { margin:10px 0; color:#8f2639; font-size:13px; }
 @media (max-width:700px) { .ops-dashboard__summary { grid-template-columns:repeat(2,minmax(0,1fr)); } .ops-dashboard .section-title { align-items:flex-start; flex-direction:column; } }
+
+/* Clear next steps on share landings, with chain history kept separate from social counts. */
+.detail-artist-follow { display:flex; align-items:center; justify-content:space-between; gap:12px; margin:12px 0 19px; padding:10px 0; border-bottom:1px solid var(--line); }
+.detail-artist-follow > span { color:var(--muted); font-size:12px; }
+.detail-artist-follow b { color:var(--ink); }
+.detail-artist-follow .button { min-height:36px; gap:6px; white-space:nowrap; }
+.collection-share-actions { display:flex; align-items:center; gap:8px; flex-shrink:0; }
+.collection-share-actions .button { min-height:38px; white-space:nowrap; }
+.nft-chain-activity { margin-top:24px; padding:17px; border:1px solid var(--line); border-radius:14px; background:var(--paper,#fff); }
+.nft-chain-activity .section-title { margin:0 0 5px; }
+.nft-chain-activity .section-title h3 { margin:3px 0 0; font-size:18px; }
+.nft-chain-activity > p { margin:0 0 12px; color:var(--muted); font-size:12px; line-height:1.5; }
+.nft-chain-activity ol { display:grid; gap:7px; margin:0; padding:0; list-style:none; }
+.nft-chain-activity li { display:flex; align-items:center; justify-content:space-between; gap:12px; min-width:0; padding:10px 11px; border:1px solid var(--line); border-radius:10px; }
+.nft-chain-activity li > span { display:grid; gap:4px; min-width:0; }
+.nft-chain-activity li b { overflow-wrap:anywhere; color:var(--ink); font-size:12px; }
+.nft-chain-activity li small { color:var(--muted); font-size:10px; }
+.nft-chain-activity li a { display:inline-flex; align-items:center; gap:4px; flex-shrink:0; color:var(--violet); font-size:10px; text-decoration:none; }
+.nft-chain-activity li a:hover { text-decoration:underline; }
+@media(max-width:700px) {
+  .collection-share-row { align-items:flex-start; flex-direction:column; }
+  .collection-share-actions { width:100%; flex-wrap:wrap; }
+  .collection-share-actions > * { flex:1; justify-content:center; }
+  .detail-artist-follow { align-items:flex-start; flex-direction:column; }
+  .nft-chain-activity { padding:13px; }
+}
