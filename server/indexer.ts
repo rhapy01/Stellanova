@@ -69,10 +69,13 @@ async function projectMintMetadata(contractId: string, tokenId: number, minter: 
   const sha256 = createHash('sha256').update(body).digest('hex')
 
   await query(
-    `INSERT INTO creator_nft_metadata (metadata_uri, collection_id, creator_wallet, object_key, sha256, bytes, name, description, image, animation_url, attributes)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `INSERT INTO creator_nft_metadata (metadata_uri, collection_id, creator_wallet, object_key, sha256, bytes, name, description, image, animation_url, attributes, provenance)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT (metadata_uri) DO NOTHING`,
-    [metadataUri, scope.toLowerCase(), minter, objectKey, sha256, body.length, name, description, image, animationUrl, attributes],
+    // Metadata discovered from arbitrary contracts is not treated as a
+    // StellaNova-issued provenance record, even if it contains a similarly
+    // named JSON property. Internal creator metadata is inserted at upload.
+    [metadataUri, scope.toLowerCase(), null, objectKey, sha256, body.length, name, description, image, animationUrl, attributes, {}],
   )
   await query(
     `INSERT INTO nft_mints (contract_id, token_id, minter, collection_id, title, image, animation_url, price_xlm, metadata_uri, stage_id)

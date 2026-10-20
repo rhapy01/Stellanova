@@ -110,6 +110,85 @@ function escapeHtml(value: unknown): string {
   return String(value ?? '').replace(/[&<>\"']/g, (character) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '\"': '&quot;', "'": '&#39;' })[character]!)
 }
 
+const publicSiteOrigin = (process.env.PUBLIC_SITE_URL || 'https://stellanova-fawn.vercel.app').replace(/\/$/, '')
+
+app.get(['/api/robots.txt', '/robots.txt'], (_req, res) => {
+  res.type('text/plain').send([
+    'User-agent: *',
+    'Allow: /',
+    'Disallow: /api/',
+    'Disallow: /account',
+    'Disallow: /saved',
+    'Disallow: /settings',
+    'Disallow: /analytics',
+    'Disallow: /create/',
+    'Disallow: /admin/',
+    `Sitemap: ${publicSiteOrigin}/sitemap.xml`,
+    '',
+  ].join('\n'))
+})
+
+app.get(['/api/sitemap.xml', '/sitemap.xml'], async (_req, res) => {
+  const publicUrls = new Set([`${publicSiteOrigin}/`, `${publicSiteOrigin}/explore`, `${publicSiteOrigin}/collections`])
+  if (databaseAvailable()) {
+    try {
+      await ensureSchema()
+      const [collectionRows, nftRows, postRows, creatorRows] = await Promise.all([
+        query<{ slug: string }[]>('SELECT slug FROM collections WHERE contract_id IS NOT NULL ORDER BY created_at DESC LIMIT 5000'),
+        query<{ contract_id: string; token_id: number }[]>('SELECT contract_id, token_id FROM nft_mints WHERE contract_id IS NOT NULL ORDER BY created_at DESC LIMIT 5000'),
+        query<{ id: number }[]>('SELECT id FROM posts WHERE COALESCE((to_jsonb(posts)->>\'is_demo\')::boolean, FALSE) = FALSE ORDER BY created_at DESC LIMIT 5000'),
+        query<{ wallet_address: string }[]>('SELECT wallet_address FROM user_profiles WHERE is_creator = TRUE ORDER BY updated_at DESC LIMIT 5000'),
+      ])
+      for (const row of collectionRows) publicUrls.add(`${publicSiteOrigin}/collection/${encodeURIComponent(row.slug)}`)
+      for (const row of nftRows) publicUrls.add(`${publicSiteOrigin}/nft/minted-${encodeURIComponent(row.contract_id.toLowerCase())}-${row.token_id}`)
+      for (const row of postRows) publicUrls.add(`${publicSiteOrigin}/post/${row.id}`)
+      for (const row of creatorRows) publicUrls.add(`${publicSiteOrigin}/creator/${encodeURIComponent(row.wallet_address)}`)
+    } catch (error) {
+      console.error('Public sitemap could not load dynamic routes', error)
+      return res.status(503).type('text/plain').send('Sitemap is temporarily unavailable')
+    }
+  }
+  const xmlEscape = (value: string) => value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\"/g, '&quot;').replace(/'/g, '&apos;')
+  const body = [...publicUrls].map((url) => `  <url><loc>${xmlEscape(url)}</loc></url>`).join('\n')
+  res.setHeader('Cache-Control', 'public, max-age=900, stale-while-revalidate=3600')
+  res.type('application/xml').send(`<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n${body}\n</urlset>`)
+})
+
+app.get(['/api/share/page/:page', '/explore', '/collections'], async (req, res) => {
+  const page = String(req.params.page ?? req.path.slice(1))
+  const pages: Record<string, { title: string; description: string; url: string }> = {
+    explore: { title: 'Explore digital art · StellaNova', description: 'Browse digital artwork and NFTs shared by creators on StellaNova.', url: `${publicSiteOrigin}/explore` },
+    collections: { title: 'NFT collections · StellaNova', description: 'Discover creator collections and live drops on StellaNova.', url: `${publicSiteOrigin}/collections` },
+  }
+  const metadata = pages[page]
+  if (!metadata) return res.status(404).type('text/plain').send('Page not found')
+  try { return await sendSocialPage(res, metadata) }
+  catch (error) {
+    console.error('Public page render failed', error)
+    return res.status(503).type('text/plain').send('Page is temporarily unavailable')
+  }
+})
+
+app.get(['/api/share/creator/:id', '/creator/:id'], async (req, res) => {
+  const id = String(req.params.id ?? '')
+  if (!stellarAddress.test(id)) return res.status(404).type('text/plain').send('Creator not found')
+  if (!databaseAvailable()) return res.status(503).type('text/plain').send('Creator information is temporarily unavailable')
+  try {
+    await ensureSchema()
+    const profiles = await query<{ display_name: string; creator_username: string | null; bio: string; is_creator: boolean }[]>(
+      'SELECT display_name, creator_username, bio, is_creator FROM user_profiles WHERE wallet_address = ? LIMIT 1', [id],
+    )
+    const profile = profiles[0]
+    if (!profile?.is_creator) return res.status(404).type('text/plain').send('Creator not found')
+    const name = profile.creator_username ? `@${profile.creator_username}` : profile.display_name.trim() || 'Stellar creator'
+    const description = profile.bio.trim() || `Explore artwork and collections from ${name} on StellaNova.`
+    return await sendSocialPage(res, { title: `${name} · StellaNova`, description, url: `${publicSiteOrigin}/creator/${encodeURIComponent(id)}` })
+  } catch (error) {
+    console.error('Creator page render failed', error)
+    return res.status(503).type('text/plain').send('Creator information is temporarily unavailable')
+  }
+})
+
 async function sendSocialPage(res: express.Response, metadata: { title: string; description: string; image?: string | null; url: string; type?: 'website' | 'article' }) {
   const file = await readFile(path.join(root, 'dist', 'index.html'), 'utf8')
   const title = escapeHtml(metadata.title)
@@ -118,6 +197,7 @@ async function sendSocialPage(res: express.Response, metadata: { title: string; 
   try { imageUrl = new URL(metadata.image || '/icon-512.png', metadata.url).toString() } catch { /* use the relative fallback */ }
   const meta = [
     ['name', 'description', metadata.description],
+    ['property', 'og:site_name', 'StellaNova'],
     ['property', 'og:type', metadata.type ?? 'website'],
     ['property', 'og:title', metadata.title],
     ['property', 'og:description', metadata.description],
@@ -137,45 +217,48 @@ async function sendSocialPage(res: express.Response, metadata: { title: string; 
     else missing.push(tag)
   }
   if (missing.length) html = html.replace('</head>', `    ${missing.join('\n    ')}\n  </head>`)
+  const canonical = `<link rel="canonical" href="${escapeHtml(metadata.url)}" />`
+  html = /<link\s+rel="canonical"[^>]*>/i.test(html)
+    ? html.replace(/<link\s+rel="canonical"[^>]*>/i, canonical)
+    : html.replace('</head>', `    ${canonical}\n  </head>`)
+  const pageSummary = `<main class="crawler-page-summary"><h1>${title}</h1><p>${description}</p><a href="${escapeHtml(metadata.url)}">Open this page in StellaNova</a></main>`
+  html = html.replace(/<div id="root">[\s\S]*?<\/div>/i, `<div id="root">${pageSummary}</div>`)
   res.type('html').send(html)
 }
 
-app.get('/api/share/collection/:slug', async (req, res) => {
+app.get(['/api/share/collection/:slug', '/collection/:slug'], async (req, res) => {
   const slugValue = slug(String(req.params.slug))
   try {
-    if (databaseAvailable()) {
-      await ensureSchema()
-      const rows = await query<{ name: string; description: string; cover: string | null }[]>(
-        'SELECT name, description, cover FROM collections WHERE slug = ? LIMIT 1', [slugValue],
-      )
-      const collection = rows[0]
-      if (collection) {
-        const baseUrl = `${req.protocol}://${req.get('host')}`
-        return await sendSocialPage(res, {
-          title: `${collection.name} · StellaNova`,
-          description: collection.description || `Explore ${collection.name} on StellaNova.`,
-          image: collection.cover,
-          url: `${baseUrl}/collection/${encodeURIComponent(slugValue)}`,
-        })
-      }
-    }
-    const baseUrl = `${req.protocol}://${req.get('host')}`
-    return await sendSocialPage(res, { title: 'Collection · StellaNova', description: 'Explore this collection on StellaNova.', url: `${baseUrl}/collection/${encodeURIComponent(slugValue)}` })
+    if (!databaseAvailable()) return res.status(503).type('text/plain').send('Collection information is temporarily unavailable')
+    await ensureSchema()
+    const rows = await query<{ name: string; description: string; cover: string | null }[]>(
+      'SELECT name, description, cover FROM collections WHERE slug = ? LIMIT 1', [slugValue],
+    )
+    const collection = rows[0]
+    if (!collection) return res.status(404).type('text/plain').send('Collection not found')
+    const baseUrl = publicSiteOrigin
+    return await sendSocialPage(res, {
+      title: `${collection.name} · StellaNova`,
+      description: collection.description || `Explore ${collection.name} on StellaNova.`,
+      image: collection.cover,
+      url: `${baseUrl}/collection/${encodeURIComponent(slugValue)}`,
+    })
   } catch (error) {
     console.error('Collection social preview failed', error)
     return res.status(503).send('Collection preview is temporarily unavailable')
   }
 })
 
-app.get('/api/share/nft/:id', async (req, res) => {
+app.get(['/api/share/nft/:id', '/nft/:id'], async (req, res) => {
   const id = String(req.params.id)
   const match = /^minted-([A-Z0-9]{56})-(\d+)$/i.exec(id)
-  const baseUrl = `${req.protocol}://${req.get('host')}`
+  if (!match) return res.status(404).type('text/plain').send('NFT not found')
+  if (!databaseAvailable()) return res.status(503).type('text/plain').send('NFT information is temporarily unavailable')
+  const baseUrl = publicSiteOrigin
   const url = `${baseUrl}/nft/${encodeURIComponent(id)}`
   try {
-    if (match && databaseAvailable()) {
-      await ensureSchema()
-      const rows = await query<{ title: string; description: string | null; image: string | null; collection_name: string | null; collection_revealed: boolean | null }[]>(
+    await ensureSchema()
+    const rows = await query<{ title: string; description: string | null; image: string | null; collection_name: string | null; collection_revealed: boolean | null }[]>(
         `SELECT COALESCE(NULLIF(m.title, ''), NULLIF(meta.name, ''), 'NFT') AS title,
                 meta.description, COALESCE(NULLIF(meta.image, ''), NULLIF(m.image, '')) AS image,
                 c.name AS collection_name, c.revealed AS collection_revealed
@@ -186,49 +269,44 @@ app.get('/api/share/nft/:id', async (req, res) => {
          LIMIT 1`,
         [match[1], Number(match[2])],
       )
-      const nft = rows[0]
-      if (nft) {
-        const unrevealed = nft.collection_revealed === false
-        const title = unrevealed ? `${nft.collection_name || 'Collection'} · StellaNova` : `${nft.title} · StellaNova`
-        const description = unrevealed
-          ? `${nft.collection_name || 'This collection'} has not revealed its artwork yet.`
-          : nft.description?.trim() || `View ${nft.title} on StellaNova.`
-        return await sendSocialPage(res, { title, description, image: unrevealed ? null : nft.image, url, type: 'article' })
-      }
-    }
-    return await sendSocialPage(res, { title: 'NFT · StellaNova', description: 'View this NFT on StellaNova.', url, type: 'article' })
+    const nft = rows[0]
+    if (!nft) return res.status(404).type('text/plain').send('NFT not found')
+    const unrevealed = nft.collection_revealed === false
+    const title = unrevealed ? `${nft.collection_name || 'Collection'} · StellaNova` : `${nft.title} · StellaNova`
+    const description = unrevealed
+      ? `${nft.collection_name || 'This collection'} has not revealed its artwork yet.`
+      : nft.description?.trim() || `View ${nft.title} on StellaNova.`
+    return await sendSocialPage(res, { title, description, image: unrevealed ? null : nft.image, url, type: 'article' })
   } catch (error) {
     console.error('NFT social preview failed', error)
     return res.status(503).send('NFT preview is temporarily unavailable')
   }
 })
 
-app.get('/api/share/post/:id', async (req, res) => {
+app.get(['/api/share/post/:id', '/post/:id'], async (req, res) => {
   const postId = Number(req.params.id)
-  const baseUrl = `${req.protocol}://${req.get('host')}`
-  const url = `${baseUrl}/post/${Number.isSafeInteger(postId) ? postId : ''}`
+  if (!Number.isSafeInteger(postId) || postId <= 0) return res.status(404).type('text/plain').send('Post not found')
+  if (!databaseAvailable()) return res.status(503).type('text/plain').send('Post information is temporarily unavailable')
+  const baseUrl = publicSiteOrigin
+  const url = `${baseUrl}/post/${postId}`
   try {
-    if (Number.isSafeInteger(postId) && postId > 0 && databaseAvailable()) {
-      await ensureSchema()
-      const rows = await query<{ caption: string; media_url: string; avatar: string; author_name: string; author_type: 'user' | 'collection'; collection_name: string | null }[]>(
+    await ensureSchema()
+    const rows = await query<{ caption: string; media_url: string; avatar: string; author_name: string; author_type: 'user' | 'collection'; collection_name: string | null }[]>(
         `SELECT p.caption, p.media_url, p.avatar, p.author_name, p.author_type, c.name AS collection_name
          FROM posts p LEFT JOIN collections c ON c.slug = p.collection_id
          WHERE p.id = ? AND COALESCE((to_jsonb(p)->>'is_demo')::boolean, FALSE) = FALSE LIMIT 1`,
         [postId],
       )
-      const post = rows[0]
-      if (post) {
-        const author = post.author_type === 'collection' ? post.collection_name || post.author_name : post.author_name || 'Creator'
-        return await sendSocialPage(res, {
-          title: `${author} shared a post · StellaNova`,
-          description: post.caption?.trim() || `View ${author}'s post on StellaNova.`,
-          image: post.media_url || post.avatar,
-          url,
-          type: 'article',
-        })
-      }
-    }
-    return await sendSocialPage(res, { title: 'Post · StellaNova', description: 'View this post on StellaNova.', url, type: 'article' })
+    const post = rows[0]
+    if (!post) return res.status(404).type('text/plain').send('Post not found')
+    const author = post.author_type === 'collection' ? post.collection_name || post.author_name : post.author_name || 'Creator'
+    return await sendSocialPage(res, {
+      title: `${author} shared a post · StellaNova`,
+      description: post.caption?.trim() || `View ${author}'s post on StellaNova.`,
+      image: post.media_url || post.avatar,
+      url,
+      type: 'article',
+    })
   } catch (error) {
     console.error('Post social preview failed', error)
     return res.status(503).send('Post preview is temporarily unavailable')
@@ -495,6 +573,15 @@ async function requireAdmin(req: express.Request, res: express.Response, next: e
 app.get('/api/health/live', (_req, res) => {
   res.setHeader('Cache-Control', 'no-store')
   res.json({ status: 'ok', timestamp: new Date().toISOString() })
+})
+
+// Minimal platform readiness probe. Keep dependency details private; the
+// authenticated operations endpoint reports database, RPC and indexer health.
+app.get('/api/health/ready', async (_req, res) => {
+  res.setHeader('Cache-Control', 'no-store')
+  const database = await checkDatabaseConnection()
+  if (!database.ok) return res.status(503).json({ status: 'not_ready' })
+  res.json({ status: 'ready' })
 })
 
 const opsAlertFallbackState = new Map<string, { status: 'degraded' | 'recovered'; sentAt: number }>()
@@ -1077,6 +1164,71 @@ app.get('/api/nfts/:contract/:tokenId/activity', async (req, res) => {
     res.json({ activity: [...unique.values()].sort((a, b) => b.ledger - a.ledger) })
   } catch (error) {
     res.status(503).json({ error: error instanceof Error ? error.message : 'NFT activity query failed' })
+  }
+})
+
+// Provenance combines creator metadata and upload fingerprints with the
+// independently indexed Stellar mint transaction. It never treats a wallet
+// address or a submitted file hash as proof of copyright.
+app.get('/api/nfts/:contract/:tokenId/provenance', async (req, res) => {
+  const contractId = String(req.params.contract ?? '').toUpperCase()
+  const tokenId = Number(req.params.tokenId)
+  if (!/^C[A-Z2-7]{55}$/.test(contractId) || !Number.isSafeInteger(tokenId) || tokenId < 0) {
+    return res.status(400).json({ error: 'A valid NFT contract and token ID are required' })
+  }
+  if (!databaseAvailable()) return res.status(503).json({ error: 'NFT provenance is not available' })
+  try {
+    await ensureSchema()
+    const rows = await query<{
+      minter: string; tx_hash: string; ledger: number;
+      metadata_uri: string | null; metadata_sha256: string | null; metadata_created_at: string | null;
+      asset_sha256: string | null; asset_content_type: string | null; asset_bytes: number | null;
+      asset_sha256_verified: boolean | null;
+      animation_sha256: string | null; animation_content_type: string | null; animation_bytes: number | null;
+      animation_sha256_verified: boolean | null;
+      provenance: Record<string, unknown> | null
+    }[]>(
+      `SELECT verified.minter, verified.tx_hash, verified.ledger,
+              meta.metadata_uri, meta.sha256 AS metadata_sha256, meta.created_at AS metadata_created_at,
+              asset.sha256 AS asset_sha256, asset.content_type AS asset_content_type, asset.bytes AS asset_bytes,
+              asset.sha256_verified AS asset_sha256_verified,
+              animation.sha256 AS animation_sha256, animation.content_type AS animation_content_type, animation.bytes AS animation_bytes,
+              animation.sha256_verified AS animation_sha256_verified,
+              meta.provenance
+       FROM verified_nft_mints verified
+       LEFT JOIN nft_mints minted ON LOWER(minted.contract_id) = LOWER(verified.contract_id) AND minted.token_id = verified.token_id
+       LEFT JOIN creator_nft_metadata meta ON meta.metadata_uri = minted.metadata_uri
+       LEFT JOIN creator_media_uploads asset ON asset.image_url = meta.image
+       LEFT JOIN creator_media_uploads animation ON animation.image_url = meta.animation_url
+       WHERE LOWER(verified.contract_id) = LOWER(?) AND verified.token_id = ? LIMIT 1`,
+      [contractId, tokenId],
+    )
+    const row = rows[0]
+    if (!row) return res.status(404).json({ error: 'No confirmed mint record was found for this NFT' })
+    res.setHeader('Cache-Control', 'public, max-age=60, stale-while-revalidate=300')
+    res.json({
+      contract_id: contractId,
+      token_id: tokenId,
+      creator_wallet: row.provenance?.version === 1 && typeof row.provenance.creator_wallet === 'string' ? row.provenance.creator_wallet : null,
+      minter: row.minter,
+      mint_tx_hash: row.tx_hash,
+      mint_ledger: row.ledger,
+      metadata_uri: row.metadata_uri,
+      metadata_sha256: row.metadata_sha256,
+      metadata_created_at: row.metadata_created_at,
+      asset_sha256: row.asset_sha256,
+      asset_content_type: row.asset_content_type,
+      asset_bytes: row.asset_bytes,
+      asset_sha256_verified: Boolean(row.asset_sha256_verified),
+      animation_sha256: row.animation_sha256,
+      animation_content_type: row.animation_content_type,
+      animation_bytes: row.animation_bytes,
+      animation_sha256_verified: Boolean(row.animation_sha256_verified),
+      version: Number(row.provenance?.version ?? 0),
+      creation_method: typeof row.provenance?.creation_method === 'string' ? row.provenance.creation_method : null,
+    })
+  } catch (error) {
+    res.status(503).json({ error: error instanceof Error ? error.message : 'NFT provenance query failed' })
   }
 })
 
@@ -2620,12 +2772,40 @@ app.post('/api/media/upload-complete', requireMediaAuthorization, async (req, re
     if (!contentType || !/^[a-f0-9]{64}$/.test(digest) || !Number.isSafeInteger(bytes) || bytes < 1 || bytes > 25 * 1024 * 1024 || !fileName || assetUrl.protocol !== 'https:' || assetUrl.hostname !== 'res.cloudinary.com' || !assetPath.startsWith(cloudNamePath) || !assetPath.includes('/upload/') || !assetPath.includes(`/${expectedPublicId}`)) {
       return res.status(400).json({ error: 'Cloudinary upload details do not match the authorized file' })
     }
+    // The browser's digest is only a claim until we hash the uploaded original
+    // ourselves. Restrict the host/path above, disallow redirects, and cap bytes
+    // while streaming so this verification cannot be used for SSRF or unbounded
+    // downloads.
+    const assetResponse = await fetch(assetUrl, { redirect: 'manual', signal: AbortSignal.timeout(20_000) })
+    if (!assetResponse.ok || assetResponse.status >= 300 || !assetResponse.body) {
+      return res.status(502).json({ error: 'Could not verify the uploaded artwork bytes. Retry the upload.' })
+    }
+    const declaredLength = Number(assetResponse.headers.get('content-length') ?? 0)
+    if (declaredLength && declaredLength > 25 * 1024 * 1024) {
+      return res.status(413).json({ error: 'Uploaded media exceeds the 25 MB limit' })
+    }
+    const reader = assetResponse.body.getReader()
+    const chunks: Uint8Array[] = []
+    let totalBytes = 0
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      totalBytes += value.byteLength
+      if (totalBytes > 25 * 1024 * 1024) {
+        await reader.cancel()
+        return res.status(413).json({ error: 'Uploaded media exceeds the 25 MB limit' })
+      }
+      chunks.push(value)
+    }
+    if (totalBytes !== bytes || sha256(Buffer.concat(chunks.map((chunk) => Buffer.from(chunk)))) !== digest) {
+      return res.status(400).json({ error: 'Uploaded media bytes did not match the supplied SHA-256 fingerprint' })
+    }
     const creatorWallet = res.locals.wallet as string | undefined
     if (creatorWallet && databaseAvailable()) {
       await ensureSchema()
       await query(
-        `INSERT INTO creator_media_uploads (image_url, collection_id, creator_wallet, object_key, sha256, content_type, bytes)
-         VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT (image_url) DO NOTHING`,
+        `INSERT INTO creator_media_uploads (image_url, collection_id, creator_wallet, object_key, sha256, content_type, bytes, sha256_verified)
+         VALUES (?, ?, ?, ?, ?, ?, ?, TRUE) ON CONFLICT (image_url) DO UPDATE SET sha256_verified = TRUE`,
         [assetUrl.toString(), collectionId, creatorWallet, key, digest, contentType, bytes],
       )
     }
@@ -2661,8 +2841,8 @@ app.post('/api/media/upload', requireMediaAuthorization, upload.single('file'), 
       await ensureSchema()
       for (const imageUrl of [r2Url, cloudinaryUrl].filter((value): value is string => Boolean(value))) {
         await query(
-          `INSERT INTO creator_media_uploads (image_url, collection_id, creator_wallet, object_key, sha256, content_type, bytes)
-           VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT (image_url) DO NOTHING`,
+        `INSERT INTO creator_media_uploads (image_url, collection_id, creator_wallet, object_key, sha256, content_type, bytes, sha256_verified)
+         VALUES (?, ?, ?, ?, ?, ?, ?, TRUE) ON CONFLICT (image_url) DO UPDATE SET sha256_verified = TRUE`,
           [imageUrl, slug(req.body?.collection ?? 'unfiled'), creatorWallet, key, digest, file.mimetype, file.size],
         )
       }
@@ -2872,6 +3052,8 @@ app.post('/api/creator/metadata', requireWallet, async (req, res) => {
   const image = String(metadata?.image ?? '').trim().slice(0, 1024)
   const animationUrl = String(metadata?.animation_url ?? '').trim().slice(0, 1024)
   const externalUrl = String(metadata?.external_url ?? '').trim().slice(0, 1024)
+  const requestedMethod = String(metadata?.creation_method ?? '')
+  const creationMethod = ['pixel-studio', 'ai-studio', 'ai-collection-studio', 'collection-settings', 'quick-mint', 'creator-import'].includes(requestedMethod) ? requestedMethod : 'creator-import'
   const editionGroup = String(metadata?.edition_group ?? '').trim()
   const editionIndex = metadata?.edition_index === undefined ? null : Number(metadata.edition_index)
   const attributes = Array.isArray(metadata?.attributes) ? metadata.attributes.slice(0, 100) : []
@@ -2891,40 +3073,64 @@ app.post('/api/creator/metadata', requireWallet, async (req, res) => {
     const collection = isPersonalMint ? null : await collectionBySlug(collectionId)
     if (!isPersonalMint && !collection) return res.status(404).json({ error: 'Collection not found' })
     if (!isPersonalMint && collection!.owner_wallet !== wallet) return res.status(403).json({ error: 'Only the collection creator can publish its metadata' })
-    const uploadedImage = await query<{ image_url: string }[]>(
-      'SELECT image_url FROM creator_media_uploads WHERE image_url = ? AND collection_id = ? AND creator_wallet = ? LIMIT 1',
+    const uploadedImage = await query<{ image_url: string; sha256: string; content_type: string; bytes: number; sha256_verified: boolean }[]>(
+      'SELECT image_url, sha256, content_type, bytes, sha256_verified FROM creator_media_uploads WHERE image_url = ? AND collection_id = ? AND creator_wallet = ? LIMIT 1',
       [image, collectionId, wallet],
     )
     // A collection cover is uploaded before the collection slug exists, so its
     // media row may be keyed by the symbol. Allow that same verified owner
     // upload to serve as unrevealed placeholder metadata for the collection.
     const uploadedCollectionCover = !isPersonalMint && collection?.cover === image
-      ? await query<{ image_url: string }[]>(
-        'SELECT image_url FROM creator_media_uploads WHERE image_url = ? AND creator_wallet = ? LIMIT 1',
+      ? await query<{ image_url: string; sha256: string; content_type: string; bytes: number; sha256_verified: boolean }[]>(
+        'SELECT image_url, sha256, content_type, bytes, sha256_verified FROM creator_media_uploads WHERE image_url = ? AND creator_wallet = ? LIMIT 1',
         [image, wallet],
       )
       : []
     if (!uploadedImage.length && !uploadedCollectionCover.length && !(isPersonalMint && /^(https:\/\/|ipfs:\/\/)/i.test(image))) return res.status(400).json({ error: 'Upload this artwork to StellaNova before publishing metadata' })
+    const assetUpload = uploadedImage[0] ?? uploadedCollectionCover[0] ?? null
+    let animationUpload: { sha256: string; content_type: string; bytes: number; sha256_verified: boolean } | null = null
     if (animationUrl) {
-      const uploadedAnimation = await query<{ image_url: string }[]>(
-        'SELECT image_url FROM creator_media_uploads WHERE image_url = ? AND collection_id = ? AND creator_wallet = ? LIMIT 1',
+      const uploadedAnimation = await query<{ image_url: string; sha256: string; content_type: string; bytes: number; sha256_verified: boolean }[]>(
+        'SELECT image_url, sha256, content_type, bytes, sha256_verified FROM creator_media_uploads WHERE image_url = ? AND collection_id = ? AND creator_wallet = ? LIMIT 1',
         [animationUrl, collectionId, wallet],
       )
       if (!uploadedAnimation.length) return res.status(400).json({ error: 'Upload this animation, audio or 3D file to StellaNova before publishing metadata' })
+      animationUpload = uploadedAnimation[0]
     }
-    const body = Buffer.from(JSON.stringify({ name, description, image, ...(animationUrl ? { animation_url: animationUrl } : {}), attributes, ...(externalUrl ? { external_url: externalUrl } : {}) }, null, 2))
+    const provenance = {
+      version: 1,
+      issuer: 'StellaNova',
+      creator_wallet: wallet,
+      created_at: new Date().toISOString(),
+      creation_method: creationMethod,
+      artwork: assetUpload ? { sha256: assetUpload.sha256, content_type: assetUpload.content_type, bytes: assetUpload.bytes, server_verified: assetUpload.sha256_verified } : null,
+      animation: animationUpload ? { sha256: animationUpload.sha256, content_type: animationUpload.content_type, bytes: animationUpload.bytes, server_verified: animationUpload.sha256_verified } : null,
+      fingerprint_note: assetUpload?.sha256_verified
+        ? 'StellaNova independently verified this SHA-256 fingerprint against the uploaded file bytes. This record is not a copyright or authorship determination.'
+        : 'This artwork has no server-verified file fingerprint. This record is not a copyright or authorship determination.',
+    }
+    const editionKey = editionGroup ? `nftgram/metadata/${collectionId}/editions/${editionGroup}/${editionIndex}.json` : null
+    // Edition URIs are predictable because the NFT contract constructs them
+    // from the stage base URI and token index. Reuse an already-issued record
+    // on launch retries so its provenance timestamp and hashes stay stable.
+    if (editionKey) {
+      const existing = await query<{ metadata_uri: string; object_key: string; sha256: string; provenance: Record<string, unknown> }[]>(
+        'SELECT metadata_uri, object_key, sha256, provenance FROM creator_nft_metadata WHERE object_key = ? AND collection_id = ? AND creator_wallet = ? LIMIT 1',
+        [editionKey, collectionId, wallet],
+      )
+      if (existing[0]) return res.status(200).json({ key: existing[0].object_key, url: existing[0].metadata_uri, sha256: existing[0].sha256, provenance: existing[0].provenance })
+    }
+    const body = Buffer.from(JSON.stringify({ name, description, image, ...(animationUrl ? { animation_url: animationUrl } : {}), attributes, ...(externalUrl ? { external_url: externalUrl } : {}), provenance }, null, 2))
     const digest = sha256(body)
-    const key = editionGroup
-      ? `nftgram/metadata/${collectionId}/editions/${editionGroup}/${editionIndex}.json`
-      : `nftgram/metadata/${collectionId}/${digest}.json`
+    const key = editionKey ?? `nftgram/metadata/${collectionId}/${digest}.json`
     const url = await putToR2({ buffer: body, mimetype: 'application/json', originalname: `${digest}.json`, size: body.length } as Express.Multer.File, key)
     if (!url) return res.status(503).json({ error: 'R2 has no public metadata URL configured' })
     await query(
-      `INSERT INTO creator_nft_metadata (metadata_uri, collection_id, creator_wallet, object_key, sha256, bytes, name, description, image, animation_url, attributes)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?::jsonb) ON CONFLICT (metadata_uri) DO NOTHING`,
-      [url, collectionId, wallet, key, digest, body.length, name, description, image, animationUrl || null, JSON.stringify(attributes)],
+      `INSERT INTO creator_nft_metadata (metadata_uri, collection_id, creator_wallet, object_key, sha256, bytes, name, description, image, animation_url, attributes, provenance)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?::jsonb, ?::jsonb) ON CONFLICT (metadata_uri) DO NOTHING`,
+      [url, collectionId, wallet, key, digest, body.length, name, description, image, animationUrl || null, JSON.stringify(attributes), JSON.stringify(provenance)],
     )
-    res.status(201).json({ key, url, sha256: digest })
+    res.status(201).json({ key, url, sha256: digest, provenance })
   } catch (error) {
     res.status(502).json({ error: error instanceof Error ? error.message : 'Metadata upload failed' })
   }

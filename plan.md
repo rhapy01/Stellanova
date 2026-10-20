@@ -1,6 +1,6 @@
 # NFTGram implementation overview
 
-NFTGram is a Testnet NFT marketplace and social feed built with Vite, React, TypeScript, Express, Postgres, Privy, and Stellar Soroban. Marketplace cards, collections, posts, and ownership views must come from indexed Testnet or persisted user data. The application does not include preloaded artwork, accounts, posts, or marketplace activity.
+NFTGram is a Testnet NFT marketplace and social feed built with Vite, React, TypeScript, Express, Postgres, Privy, and Stellar Soroban. Marketplace cards, collections, posts, and ownership views must come from indexed Testnet or persisted user data. The browser bundle has empty fallback arrays; a separate opt-in Testnet feed seed fixture exists for visual testing and is not production marketplace data.
 
 ## Current architecture
 
@@ -9,7 +9,7 @@ NFTGram is a Testnet NFT marketplace and social feed built with Vite, React, Typ
 - `src/lib/backend.ts` calls the authenticated API and indexed read models.
 - `server/index.ts` contains the API, authentication, uploads, and read-model routes.
 - `server/db.ts` defines Postgres schema and compatibility migrations.
-- `src/data.ts` defines shared content types and empty-state fallbacks; indexed records are loaded from the API.
+- `src/data.ts` defines shared content types and empty-state fallbacks; indexed records are loaded from the API. `scripts/seed-testnet-feed.ts` and `.testnet-sample-content.json` are an explicit Testnet-only visual fixture.
 - `contracts/` contains the Soroban NFT and marketplace contracts.
 - `public/` contains PWA assets and contract artifacts.
 
@@ -23,4 +23,4 @@ NFTGram is a Testnet NFT marketplace and social feed built with Vite, React, Typ
 
 ## Remaining delivery work
 
-See [TODO.md](TODO.md) for Testnet feature completion and [SCALE_PLAN.md](SCALE_PLAN.md) for reliability, delivery speed, and traffic growth work. The most important open areas are Privy end-to-end configuration, canonical media/metadata through mint and indexing, auction lifecycle integration, creator-level royalties, and operational readiness.
+See [TODO.md](TODO.md) for Testnet feature completion and [SCALE_PLAN.md](SCALE_PLAN.md) for reliability, delivery speed, and traffic growth work. The product owner confirms the core wallet, media, mint/indexing, social, marketplace, and notification journeys work in the running Testnet app. The repository has unit tests for all three Soroban contracts but no automated Express/PostgreSQL end-to-end suite, so those flows are not automatically replayed by CI.

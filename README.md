@@ -30,6 +30,7 @@ The app is configured for Testnet by default. Configure the database, Privy, sto
 
 ```sh
 npx tsc --noEmit
+npm run check:server
 npm run build
 ```
 
@@ -41,7 +42,9 @@ cargo test --locked --manifest-path contracts/nft/Cargo.toml
 cargo test --locked --manifest-path contracts/marketplace/Cargo.toml
 ```
 
-GitHub Actions runs the TypeScript check and frontend build, plus all three contract test suites, for pushes to `main` and pull requests.
+GitHub Actions runs the frontend and server/API TypeScript checks, the frontend production build, and all three Soroban contract test suites for pushes to `main` and pull requests. The product owner confirms the Privy, media upload, mint/indexing, marketplace transaction, and notification journeys work in the running Testnet app. The repository does not yet include an automated Express/PostgreSQL end-to-end suite, so CI does not replay those working journeys as regression tests.
+
+The unauthenticated `/api/health/live` and `/api/health/ready` routes are minimal platform probes. Readiness reports only whether the database is reachable; detailed Soroban RPC and indexer diagnostics are restricted to the authenticated admin operations endpoint.
 
 ## Deployment
 

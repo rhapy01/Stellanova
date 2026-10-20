@@ -2,19 +2,17 @@
 
 This plan assumes Stellar Testnet remains the active network until the product's core flows are complete. Scale work should follow measured bottlenecks; do not add infrastructure just because a component is fashionable.
 
-## Finish core Testnet flows first
+## Core Testnet journeys
 
-1. Complete auction create, bid, outbid refund, cancellation, settlement and no-bid expiry through the UI, indexer and wallet notifications.
-2. Make creator royalties explicit and consistent from mint/listing through every secondary sale. The contract currently has a global royalty recipient/rate, while the product displays creator-specific rates.
-3. Verify email signup creates or restores one Stellar wallet, and that sign, session expiry, sign-out and Freighter fallback all work with configured Privy credentials.
-4. Complete creator media upload → immutable metadata → mint → indexed ownership and display. Keep canonical originals/metadata separate from responsive derivatives.
-5. Ensure marketplace and account views are backed by indexed Testnet records and refuse chain actions for unmapped records.
+The product owner confirms the current user journeys work: Privy email signup and wallet restore, media upload and metadata creation, minting and indexed ownership, social persistence, listings/offers/auctions, collection mint stages, and in-app notifications. The open integration-test item below is about automated regression coverage; it does not imply these journeys are currently broken.
+
+Separate product limitations remain: the marketplace contract uses a configured royalty recipient/rate rather than automatic per-creator royalty routing, and optional email/push notification preferences are not implemented.
 
 ## Scale in stages
 
 ### Reliability before traffic
 
-- Implemented in the app: API request IDs and structured logs; liveness/readiness probes; DB-backed API 5xx and health alerts with webhook/email delivery and recovery notifications; daily authenticated Vercel Cron; admin transaction-reconciliation dashboard with bounded Soroban ownership and metadata repair. Set `CRON_SECRET` and SMTP or `OPS_ALERT_WEBHOOK_URL` in deployment environment to activate scheduled delivery.
+- Implemented in the app: API request IDs and structured logs; liveness and database-readiness probes; DB-backed API 5xx and health alerts with webhook/email delivery and recovery notifications; daily authenticated Vercel Cron; admin transaction-reconciliation dashboard with bounded Soroban ownership and metadata repair. Set `CRON_SECRET` and SMTP or `OPS_ALERT_WEBHOOK_URL` in deployment environment to activate scheduled delivery. Soroban RPC and indexer readiness details remain admin-only.
 - Implemented in contracts: a first 8-test Soroban NFT unit suite for collection reveal/minting, ownership boundaries, batch stage minting/caps and transfer state. Run with `cargo test --manifest-path contracts/nft/Cargo.toml`. This is a baseline; payment/allowlist, stage lifecycle, approval-expiry and marketplace integration cases are still needed before security review.
 - Still needed: verify production alert delivery, run and retain a Testnet reconciliation drill, rehearse database backup restore, configure external log retention, add route-level exception traces and Privy availability metrics. Client-generated social funnel writes are disabled; social counts are not derived from those events.
 - Track user-facing transaction states as pending, confirmed, failed or reconciliation-required. Store transaction hashes and make retries idempotent.
@@ -23,10 +21,9 @@ This plan assumes Stellar Testnet remains the active network until the product's
 
 ### Faster delivery
 
-- Add CI for type checks, production builds, both Soroban contract unit suites, and an isolated Testnet smoke flow. Keep deploys behind separate preview/Testnet/production configuration.
+- CI now checks frontend and server/API TypeScript, builds the frontend, and runs all three Soroban contract unit suites. Still needed: an automated disposable-Testnet regression suite for email signup, wallet connect, mint, list, buy, offer, auction and media upload. This is test automation, not an unresolved user-facing flow. Keep deploys behind separate preview/Testnet/production configuration.
 - Use a single API/data adapter for marketplace records and indexed chain records.
 - Add contract ABI/config validation at startup and document repeatable Testnet deployment commands.
-- Add a small end-to-end smoke suite for email signup, wallet connect, mint, list, buy, offer, auction and media upload; run it against a disposable Testnet configuration.
 
 ### Higher traffic
 

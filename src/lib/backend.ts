@@ -413,6 +413,35 @@ export type NftChainActivityEntry = {
   amount_xlm: string | null
 }
 
+export type NftProvenanceRecord = {
+  contract_id: string
+  token_id: number
+  creator_wallet: string | null
+  minter: string
+  mint_tx_hash: string
+  mint_ledger: number
+  metadata_uri: string | null
+  metadata_sha256: string | null
+  metadata_created_at: string | null
+  asset_sha256: string | null
+  asset_content_type: string | null
+  asset_bytes: number | null
+  asset_sha256_verified: boolean
+  animation_sha256: string | null
+  animation_content_type: string | null
+  animation_bytes: number | null
+  animation_sha256_verified: boolean
+  version: number
+  creation_method: string | null
+}
+
+export async function fetchNftProvenance(contractId: string, tokenId: number): Promise<NftProvenanceRecord> {
+  const response = await fetch(`/api/nfts/${encodeURIComponent(contractId)}/${tokenId}/provenance`)
+  const data = await response.json() as NftProvenanceRecord & { error?: string }
+  if (!response.ok) throw new Error(data.error || 'Unable to load NFT provenance')
+  return data
+}
+
 export async function fetchNftChainActivity(contractId: string, tokenId: number): Promise<NftChainActivityEntry[]> {
   const response = await fetch(`/api/nfts/${encodeURIComponent(contractId)}/${tokenId}/activity`)
   const data = await response.json() as { activity?: NftChainActivityEntry[]; error?: string }

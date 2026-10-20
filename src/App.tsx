@@ -9,6 +9,7 @@ import { authenticateWallet, clearWalletSession, createPost, fetchPosts, loadSoc
 import { MediaAdmin } from './admin-media'
 import { useStellarAuth } from './lib/privy-auth'
 import { uploadCreatorMetadata, uploadMedia } from './lib/media'
+import { fetchNftProvenance, type NftProvenanceRecord } from './lib/backend'
 import { authHeaders } from './lib/backend'
 import { AiStudioPage, PixelStudioPage, type StudioMintInput } from './create-studio'
 import { AiCollectionStudioPage, getRarityTierSchedule, getRarityTierCounts, seededShuffle, type RarityTier, type TransferAsset } from './ai-collection-studio'
@@ -533,6 +534,52 @@ function App() {
     if (window.location.pathname !== path) window.history.pushState({ stellaNovaRoute: true }, '', path)
   }, [detail, pendingCollectionSlug, pendingNftId, sharedPostId, view])
 
+  useEffect(() => {
+    const pathname = window.location.pathname
+    // Dynamic share pages already arrive with server-rendered metadata. Keep
+    // their item-specific title/description while React loads their data.
+    if (!detail && (pathname.startsWith('/collection/') || pathname.startsWith('/nft/') || pathname.startsWith('/post/'))) return
+    let title = 'StellaNova — Social marketplace for digital art'
+    let description = 'Discover digital art, follow creators, and collect NFTs on Stellar.'
+    if (detail?.type === 'nft') {
+      title = `${detail.item.title} · StellaNova`
+      description = `View ${detail.item.title} on StellaNova.`
+    } else if (detail?.type === 'collection') {
+      title = `${detail.item.name} · StellaNova`
+      description = detail.item.description?.trim() || `Explore ${detail.item.name} on StellaNova.`
+    } else if (detail?.type === 'creator') {
+      const creator = creators.find((item) => item.id === detail.id)
+      title = `${creator?.name || 'Creator'} · StellaNova`
+      description = creator?.bio?.trim() || `Explore artwork and collections from ${creator?.name || 'this creator'} on StellaNova.`
+    } else {
+      const pageMetadata: Partial<Record<View, { title: string; description: string }>> = {
+        home: { title: 'StellaNova — Social marketplace for digital art', description },
+        explore: { title: 'Explore digital art · StellaNova', description: 'Browse digital artwork and NFTs shared by creators on StellaNova.' },
+        collections: { title: 'NFT collections · StellaNova', description: 'Discover creator collections and live drops on StellaNova.' },
+        analytics: { title: 'Marketplace analytics · StellaNova', description: 'Explore verified Stellar marketplace activity on StellaNova.' },
+      }
+      const page = pageMetadata[view]
+      if (page) ({ title, description } = page)
+    }
+    document.title = title
+    const setMeta = (selector: string, attribute: string, value: string) => {
+      let element = document.head.querySelector<HTMLMetaElement>(selector)
+      if (!element) { element = document.createElement('meta'); element.setAttribute(attribute, selector.match(/name="([^"]+)"/)?.[1] ?? selector.match(/property="([^"]+)"/)?.[1] ?? ''); document.head.appendChild(element) }
+      element.content = value
+    }
+    setMeta('meta[name="description"]', 'name', description)
+    setMeta('meta[property="og:title"]', 'property', title)
+    setMeta('meta[property="og:description"]', 'property', description)
+    setMeta('meta[name="twitter:title"]', 'name', title)
+    setMeta('meta[name="twitter:description"]', 'name', description)
+    let canonical = document.head.querySelector<HTMLLinkElement>('link[rel="canonical"]')
+    if (!canonical) { canonical = document.createElement('link'); canonical.rel = 'canonical'; document.head.appendChild(canonical) }
+    canonical.href = `${window.location.origin}${pathname}`
+    let robots = document.head.querySelector<HTMLMetaElement>('meta[name="robots"]')
+    if (!robots) { robots = document.createElement('meta'); robots.name = 'robots'; document.head.appendChild(robots) }
+    robots.content = /^\/(account|saved|settings|analytics|create|admin)(\/|$)/.test(pathname) ? 'noindex, nofollow' : 'index, follow'
+  }, [detail, view])
+
   useLayoutEffect(() => {
     window.scrollTo({ top: 0, left: 0, behavior: 'instant' })
   }, [routeKey])
@@ -764,8 +811,13 @@ function App() {
     handlePostLike(postId)
   }
   const handlePostDislike = (postId: number) => {
+    if (!stellarWallet) { notify('Connect your Stellar wallet to react to posts'); return }
     const key = `post:${postId}`
     const wasDisliked = disliked.includes(key)
+    const postBefore = posts.find((item) => item.id === postId)
+    const wasLiked = postBefore?.liked ?? false
+    const likesBefore = postBefore?.likes ?? 0
+    const dislikesBefore = postBefore?.dislikes ?? 0
     setDisliked((current) => wasDisliked ? current.filter((id) => id !== key) : [...current, key])
     setPosts((current) => current.map((post) => post.id === postId ? {
       ...post,
@@ -773,7 +825,13 @@ function App() {
       likes: !wasDisliked && post.liked ? Math.max(0, post.likes - 1) : post.likes,
       dislikes: Math.max(0, (post.dislikes ?? 0) + (wasDisliked ? -1 : 1)),
     } : post))
-    if (stellarWallet && postId > 0) void togglePostDislike(stellarWallet.address, postId).catch(() => notify('Reaction could not sync; it remains saved on this device'))
+    if (postId > 0) void togglePostDislike(stellarWallet.address, postId).catch(() => {
+      setDisliked((current) => wasDisliked ? [...new Set([...current, key])] : current.filter((id) => id !== key))
+      setPosts((current) => current.map((post) => post.id === postId
+        ? { ...post, liked: wasLiked, likes: likesBefore, dislikes: dislikesBefore }
+        : post))
+      notify('Reaction could not be saved. Check your connection and try again.')
+    })
   }
 
   const handlePostComment = async (postId: number, text: string, parentId: number | string | null = null) => {
@@ -1133,6 +1191,7 @@ function App() {
       const animationUrl = animation?.original.r2Url ?? animation?.original.cloudinaryUrl ?? undefined
       const metadata = await uploadCreatorMetadata(stellarWallet.address, mintScope, {
         name: title, description: description.trim(), image, animation_url: animationUrl, attributes: parseTraits(traitText),
+        creation_method: draft?.provenanceSource ?? 'quick-mint',
       })
       if (!metadata.url) throw new Error('Metadata storage did not return a public URL')
       const { tokenId, hash } = await mintNftWithMetadata(stellarWallet, contractId, mintScope, metadata.url)
@@ -2034,7 +2093,7 @@ function DetailView({ detail, allNfts, allCollections, saved, toggleSaved, openN
     const collection = collectionFor(item.collectionId)
     const currentOwner = (item.ownerAddress || item.creatorId).toLowerCase()
     const relatedNfts = allNfts.filter((next) => next.id !== item.id && (next.ownerAddress || next.creatorId).toLowerCase() === currentOwner).slice(0, 3)
-    return <div className="detail-page"><button className="back-link" onClick={onBack}><Icon name="arrow" size={16} /> Back to feed</button><div className="detail-grid"><div className="detail-art"><NftArtwork item={item} /></div><div className="detail-copy"><div className="detail-kicker"><span className="eyebrow">{collection.symbol} · {item.trait}</span><CopyLinkButton path={`/nft/${encodeURIComponent(item.id)}`} label="Share NFT" /><button className={`save-button ${saved.includes(item.id) ? 'is-saved' : ''}`} onClick={() => toggleSaved(item.id)}><Icon name="bookmark" size={20} /></button></div><h1>{item.title}</h1><button className="detail-creator" onClick={() => onCreator(creator.id)}><Avatar src={creator.avatar} alt={ownerName} size="sm" ring /><span><b>{ownerName} {creator.verified && <Verified />}</b><small>Current owner</small></span><Icon name="chevron" size={16} /></button>{artist.id && <div className="detail-artist-follow"><span>Created by <b>{artist.name}</b></span><Button variant="outline" onClick={() => onFollowCreator(artist.id)}><Icon name="heart" size={14} />{creatorFollows.includes(artist.id) ? "Following" : "Follow creator"}</Button></div>}<div className="detail-price"><span><small>{item.saleType === 'Auction' ? item.auctionEnds : item.saleType === 'Offers' ? 'Best offer' : item.saleType === 'Not listed' ? 'Sale status' : 'Current price'}</small><b>{item.saleType === 'Offers' ? item.bestOffer : item.price}</b><em>{item.priceUsd} · {item.chain}</em></span><div className="detail-actions">{isCurrentOwner ? <><span className="detail-owner-note">You own this NFT</span><Button variant="outline" onClick={() => onSell(item)}>List for sale</Button></> : <>{item.tokenId !== undefined && item.contractId && <Button variant="outline" onClick={() => onOffer(item)}>Make offer</Button>}{item.saleType === 'Auction' || item.saleType === 'Buy now' ? <Button onClick={() => onBuy(item)}>{item.saleType === 'Auction' ? 'Place bid' : 'Buy now'} <Icon name="arrow" size={16} /></Button> : null}</>}</div></div><div className="detail-meta"><Meta label="Collection" value={collection.name} onClick={() => onCollection(collection)} /><Meta label="Token standard" value="SEP-50 NFT" />{item.rarity_rank !== null && item.rarity_rank !== undefined && <Meta label="Rarity rank" value={`#${item.rarity_rank}`} />}{item.rarity_score !== null && item.rarity_score !== undefined && <Meta label="Rarity score" value={item.rarity_score.toFixed(3)} />}{(item.attributes ?? []).map((attribute) => <Meta key={`${item.id}-${attribute.trait_type}`} label={attribute.trait_type} value={String(attribute.value)} />)}<Meta label="Owner" value={item.ownedBy} /><Meta label="Minted" value={item.minted} /><Meta label="Royalty" value={item.royalty} /><Meta label="Best offer" value={item.bestOffer ?? '—'} /></div><NftChainActivity contractId={item.contractId} tokenId={item.tokenId} /><SocialPanel item={item} comments={comments[item.id] ?? []} onComment={onComment} liked={liked.includes(item.id)} disliked={disliked.includes(item.id)} onLike={onLike} onDislike={onDislike} onSell={onSell} /></div></div>{matchingOffers.length > 0 && <section className="section-block detail-offers"><div className="section-title"><div><span className="eyebrow">OFFERS ON THIS NFT</span><h3>Review buyer offers</h3></div></div><div className="market-manage">{matchingOffers.map((offer) => <MarketplaceIncomingOfferRow key={`detail-offer-${offer.offer_id}`} offer={offer} onAccept={() => onAcceptOffer(offer.offer_id, offer.contract_id)} onReject={() => onRejectOffer(offer.offer_id, offer.contract_id)} onCounter={(amount) => onCounterOffer(offer.offer_id, amount)} />)}</div></section>}{relatedNfts.length > 0 && <section className="detail-more"><div className="section-title"><div><span className="eyebrow">MORE FROM {ownerName.toUpperCase()}</span><h3>Keep exploring</h3></div></div><div className="feed-grid">{relatedNfts.map((next) => <ArtworkCard item={next} key={next.id} saved={saved.includes(next.id)} onSave={() => toggleSaved(next.id)} onOpen={() => openNft(next)} onCreator={() => onCreator(next.creatorId)} onCollection={() => onCollection(collectionFor(next.collectionId))} liked={liked.includes(next.id)} disliked={disliked.includes(next.id)} onLike={() => onLike(next.id)} onDislike={() => onDislike(next.id)} />)}</div></section>}</div>
+    return <div className="detail-page"><button className="back-link" onClick={onBack}><Icon name="arrow" size={16} /> Back to feed</button><div className="detail-grid"><div className="detail-art"><NftArtwork item={item} /></div><div className="detail-copy"><div className="detail-kicker"><span className="eyebrow">{collection.symbol} · {item.trait}</span><CopyLinkButton path={`/nft/${encodeURIComponent(item.id)}`} label="Share NFT" /><button className={`save-button ${saved.includes(item.id) ? 'is-saved' : ''}`} onClick={() => toggleSaved(item.id)}><Icon name="bookmark" size={20} /></button></div><h1>{item.title}</h1><button className="detail-creator" onClick={() => onCreator(creator.id)}><Avatar src={creator.avatar} alt={ownerName} size="sm" ring /><span><b>{ownerName} {creator.verified && <Verified />}</b><small>Current owner</small></span><Icon name="chevron" size={16} /></button>{artist.id && <div className="detail-artist-follow"><span>Created by <b>{artist.name}</b></span><Button variant="outline" onClick={() => onFollowCreator(artist.id)}><Icon name="heart" size={14} />{creatorFollows.includes(artist.id) ? "Following" : "Follow creator"}</Button></div>}<div className="detail-price"><span><small>{item.saleType === 'Auction' ? item.auctionEnds : item.saleType === 'Offers' ? 'Best offer' : item.saleType === 'Not listed' ? 'Sale status' : 'Current price'}</small><b>{item.saleType === 'Offers' ? item.bestOffer : item.price}</b><em>{item.priceUsd} · {item.chain}</em></span><div className="detail-actions">{isCurrentOwner ? <><span className="detail-owner-note">You own this NFT</span><Button variant="outline" onClick={() => onSell(item)}>List for sale</Button></> : <>{item.tokenId !== undefined && item.contractId && <Button variant="outline" onClick={() => onOffer(item)}>Make offer</Button>}{item.saleType === 'Auction' || item.saleType === 'Buy now' ? <Button onClick={() => onBuy(item)}>{item.saleType === 'Auction' ? 'Place bid' : 'Buy now'} <Icon name="arrow" size={16} /></Button> : null}</>}</div></div><div className="detail-meta"><Meta label="Collection" value={collection.name} onClick={() => onCollection(collection)} /><Meta label="Token standard" value="SEP-50 NFT" />{item.rarity_rank !== null && item.rarity_rank !== undefined && <Meta label="Rarity rank" value={`#${item.rarity_rank}`} />}{item.rarity_score !== null && item.rarity_score !== undefined && <Meta label="Rarity score" value={item.rarity_score.toFixed(3)} />}{(item.attributes ?? []).map((attribute) => <Meta key={`${item.id}-${attribute.trait_type}`} label={attribute.trait_type} value={String(attribute.value)} />)}<Meta label="Owner" value={item.ownedBy} /><Meta label="Minted" value={item.minted} /><Meta label="Royalty" value={item.royalty} /><Meta label="Best offer" value={item.bestOffer ?? '—'} /></div><NftProvenance contractId={item.contractId} tokenId={item.tokenId} /><NftChainActivity contractId={item.contractId} tokenId={item.tokenId} /><SocialPanel item={item} comments={comments[item.id] ?? []} onComment={onComment} liked={liked.includes(item.id)} disliked={disliked.includes(item.id)} onLike={onLike} onDislike={onDislike} onSell={onSell} /></div></div>{matchingOffers.length > 0 && <section className="section-block detail-offers"><div className="section-title"><div><span className="eyebrow">OFFERS ON THIS NFT</span><h3>Review buyer offers</h3></div></div><div className="market-manage">{matchingOffers.map((offer) => <MarketplaceIncomingOfferRow key={`detail-offer-${offer.offer_id}`} offer={offer} onAccept={() => onAcceptOffer(offer.offer_id, offer.contract_id)} onReject={() => onRejectOffer(offer.offer_id, offer.contract_id)} onCounter={(amount) => onCounterOffer(offer.offer_id, amount)} />)}</div></section>}{relatedNfts.length > 0 && <section className="detail-more"><div className="section-title"><div><span className="eyebrow">MORE FROM {ownerName.toUpperCase()}</span><h3>Keep exploring</h3></div></div><div className="feed-grid">{relatedNfts.map((next) => <ArtworkCard item={next} key={next.id} saved={saved.includes(next.id)} onSave={() => toggleSaved(next.id)} onOpen={() => openNft(next)} onCreator={() => onCreator(next.creatorId)} onCollection={() => onCollection(collectionFor(next.collectionId))} liked={liked.includes(next.id)} disliked={disliked.includes(next.id)} onLike={() => onLike(next.id)} onDislike={() => onDislike(next.id)} />)}</div></section>}</div>
   }
   if (detail.type === 'creator') {
     const creator = creatorFor(detail.id, creatorProfiles)
@@ -2795,7 +2854,7 @@ function CollectionDropSetup({ collection, wallet, onClose, onLaunched, notify }
               const attributes: { trait_type: string; value: string | number | boolean }[] = [...(asset.attributes ?? []).filter((attribute: { trait_type: string; value: string | number | boolean }) => String(attribute.trait_type).toLowerCase() !== 'rarity')]
               if (tier) attributes.push({ trait_type: 'Rarity', value: tier === 'high' ? 'High' : tier === 'medium' ? 'Medium' : 'Common' })
               const name = masterArtworkExpansion ? `${cleanName} #${index + 1}` : assets.length > 1 ? `${asset.name} #${index + 1}` : asset.name
-              const metadata = await uploadCreatorMetadata(wallet.address, slug, { name, description: asset.description, image: asset.image, animation_url: asset.animation_url || undefined, attributes, ...(editionGroup ? { edition_group: editionGroup, edition_index: index } : {}) })
+              const metadata = await uploadCreatorMetadata(wallet.address, slug, { name, description: asset.description, image: asset.image, animation_url: asset.animation_url || undefined, attributes, creation_method: 'ai-collection-studio', ...(editionGroup ? { edition_group: editionGroup, edition_index: index } : {}) })
               if (!metadata.url) throw new Error(`Could not prepare edition ${index + 1} metadata`)
               return metadata.url
             }))
@@ -2859,6 +2918,41 @@ function CollectionDropSetup({ collection, wallet, onClose, onLaunched, notify }
     </div>}
     <div className="drop-wizard__footer"><Button variant="quiet" onClick={() => void clearSavedSetup()} disabled={loading || busy || Boolean(draft.launched)}>Clear saved setup</Button><span><Button variant="outline" onClick={() => setStep((current) => Math.max(0, current - 1))} disabled={busy || step === 0}>Back</Button><Button variant="outline" onClick={() => setStep((current) => Math.min(4, current + 1))} disabled={busy || step === 4}>Next</Button></span></div>
   </div>
+}
+
+function NftProvenance({ contractId, tokenId }: { contractId?: string; tokenId?: number }) {
+  const [record, setRecord] = useState<NftProvenanceRecord | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState(false)
+  useEffect(() => {
+    let active = true
+    if (!contractId || tokenId === undefined) { setRecord(null); setLoading(false); setError(false); return }
+    setLoading(true)
+    setError(false)
+    void fetchNftProvenance(contractId, tokenId)
+      .then((value) => { if (active) setRecord(value) })
+      .catch(() => { if (active) { setRecord(null); setError(true) } })
+      .finally(() => { if (active) setLoading(false) })
+    return () => { active = false }
+  }, [contractId, tokenId])
+  if (!contractId || tokenId === undefined) return null
+  const hash = (value: string | null) => value ? <code title={value}>{value}</code> : <span>Not recorded</span>
+  const rows = record ? [
+    ...(record.creator_wallet ? [{ label: 'Creator wallet', value: <code title={record.creator_wallet}>{shortenStellarAddress(record.creator_wallet)}</code> }] : []),
+    ...(record.creation_method ? [{ label: 'Creation workflow', value: <span>{({ 'pixel-studio': 'Pixel Studio', 'ai-studio': 'AI Art Studio', 'ai-collection-studio': 'AI Collection Studio', 'collection-settings': 'Collection mint setup', 'quick-mint': 'Quick mint', 'creator-import': 'Creator import' } as Record<string, string>)[record.creation_method] ?? 'StellaNova creator flow'}</span> }] : []),
+    { label: 'Minted by', value: <code title={record.minter}>{shortenStellarAddress(record.minter)}</code> },
+    { label: record.asset_sha256_verified ? 'Artwork · SHA-256 (server verified)' : 'Artwork · SHA-256 (unverified)', value: hash(record.asset_sha256) },
+    ...(record.animation_sha256 ? [{ label: record.animation_sha256_verified ? 'Animation · SHA-256 (server verified)' : 'Animation · SHA-256 (unverified)', value: hash(record.animation_sha256) }] : []),
+    { label: 'Metadata · SHA-256', value: hash(record.metadata_sha256) },
+    { label: 'Mint transaction', value: <a href={`${STELLAR_EXPLORER_URL}/tx/${record.mint_tx_hash}`} target="_blank" rel="noreferrer">{record.mint_tx_hash.slice(0, 8)}…{record.mint_tx_hash.slice(-6)} · ledger #{record.mint_ledger.toLocaleString()} <Icon name="arrow" size={12} /></a> },
+    ...(record.metadata_uri ? [{ label: 'Metadata document', value: <a href={record.metadata_uri} target="_blank" rel="noreferrer">Open JSON <Icon name="arrow" size={12} /></a> }] : []),
+    ...(record.metadata_created_at ? [{ label: 'Metadata recorded', value: <span>{new Date(record.metadata_created_at).toLocaleString()}</span> }] : []),
+  ] : []
+  return <section className="nft-provenance" aria-label="NFT provenance record">
+    <div className="section-title"><div><span className="eyebrow">ORIGIN RECORD</span><h3>Artwork provenance</h3></div></div>
+    <p>Creator metadata and the confirmed Stellar mint are recorded here. Artwork fingerprints are marked when StellaNova independently verified the uploaded bytes. A fingerprint identifies file bytes; it does not establish copyright or authorship.</p>
+    {loading ? <p className="muted-note">Loading provenance record…</p> : error ? <p className="muted-note">Provenance details could not be loaded right now.</p> : rows.length ? <dl>{rows.map((row) => <div key={row.label}><dt>{row.label}</dt><dd>{row.value}</dd></div>)}</dl> : <p className="muted-note">No confirmed mint record is available yet.</p>}
+  </section>
 }
 
 function NftChainActivity({ contractId, tokenId }: { contractId?: string; tokenId?: number }) {
@@ -2996,6 +3090,7 @@ function CollectionMintTimeline({ collection, wallet, notify, setMintedNfts, onS
         const metadata = await uploadCreatorMetadata(wallet.address, slug, {
           name: stageArtwork.length > 1 ? `${stageTitle.trim()} #${i + 1}` : stageTitle.trim(),
           description: stageDescription.trim(), image, animation_url: animationUrl, attributes: parseEditionTraits(stageTraits, i),
+          creation_method: 'collection-settings',
           ...(editionGroup ? { edition_group: editionGroup, edition_index: i } : {}),
         })
         if (!metadata.url) throw new Error(`Metadata for edition ${i + 1} did not return a public URL`)

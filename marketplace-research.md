@@ -4,7 +4,7 @@ OpenSea’s official support materials describe collection offers as one-time of
 
 OpenSea’s buying and selling materials describe selling as a wallet-authorized listing or offer flow, and its current notification help documents user-controlled live alerts and email notifications. StellaNova should therefore separate immutable on-chain settlement events from user notification preferences. [2] [3]
 
-StellaNova’s current Soroban marketplace already has fixed-price listings, cancellations, purchases, escrowed offers, offer cancellation and offer acceptance. It does not yet have auctions, royalty routing, indexed ownership or authenticated server notifications. Those are required before claiming full end-to-end production behavior.
+StellaNova's current Testnet app supports fixed-price listings, cancellations, purchases, escrowed offers, offer cancellation/acceptance, auctions, indexed ownership, and authenticated in-app notifications. The product owner confirms the marketplace journeys work in the running app. The remaining royalty limitation is architectural: the contract uses a configured royalty recipient/rate rather than automatic per-creator routing. Automated Express/PostgreSQL end-to-end regression coverage is also not yet in CI; that is a testing gap, not evidence that the live journeys fail.
 
 [1]: https://support.opensea.io/en/articles/8866980-what-is-a-collection-offer "OpenSea collection offers"
 [2]: https://support.opensea.io/en/collections/8079233-buying-selling-nfts "OpenSea buying and selling NFTs"

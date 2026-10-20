@@ -17,6 +17,26 @@
   ],
   "rewrites": [
     {
+      "source": "/robots.txt",
+      "destination": "/api?__route=robots.txt"
+    },
+    {
+      "source": "/sitemap.xml",
+      "destination": "/api?__route=sitemap.xml"
+    },
+    {
+      "source": "/explore",
+      "destination": "/api?__route=share/page/explore"
+    },
+    {
+      "source": "/collections",
+      "destination": "/api?__route=share/page/collections"
+    },
+    {
+      "source": "/creator/:id",
+      "destination": "/api?__route=share/creator/:id"
+    },
+    {
       "source": "/api/:path*",
       "destination": "/api?__route=:path*"
     },

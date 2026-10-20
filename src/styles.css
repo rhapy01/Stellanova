@@ -2685,6 +2685,17 @@ h1, h2, h3, h4, h5, h6,
 .detail-artist-follow .button { min-height:36px; gap:6px; white-space:nowrap; }
 .collection-share-actions { display:flex; align-items:center; gap:8px; flex-shrink:0; }
 .collection-share-actions .button { min-height:38px; white-space:nowrap; }
+.nft-provenance { margin-top:24px; padding:17px; border:1px solid var(--line); border-radius:14px; background:var(--paper,#fff); }
+.nft-provenance .section-title { margin:0 0 5px; }
+.nft-provenance .section-title h3 { margin:3px 0 0; font-size:18px; }
+.nft-provenance > p { margin:0 0 12px; color:var(--muted); font-size:12px; line-height:1.5; }
+.nft-provenance dl { display:grid; gap:7px; margin:0; }
+.nft-provenance dl > div { display:grid; grid-template-columns:minmax(130px, 0.8fr) minmax(0, 1.2fr); align-items:center; gap:10px; padding:10px 11px; border:1px solid var(--line); border-radius:10px; }
+.nft-provenance dt { color:var(--muted); font-size:11px; }
+.nft-provenance dd { display:flex; align-items:center; gap:6px; min-width:0; margin:0; color:var(--ink); font-size:11px; overflow-wrap:anywhere; }
+.nft-provenance code { overflow:hidden; color:var(--ink); font-family:ui-monospace, SFMono-Regular, Menlo, monospace; font-size:10px; text-overflow:ellipsis; }
+.nft-provenance a { display:inline-flex; align-items:center; gap:4px; color:var(--violet); text-decoration:none; }
+.nft-provenance a:hover { text-decoration:underline; }
 .nft-chain-activity { margin-top:24px; padding:17px; border:1px solid var(--line); border-radius:14px; background:var(--paper,#fff); }
 .nft-chain-activity .section-title { margin:0 0 5px; }
 .nft-chain-activity .section-title h3 { margin:3px 0 0; font-size:18px; }
@@ -2701,5 +2712,7 @@ h1, h2, h3, h4, h5, h6,
   .collection-share-actions { width:100%; flex-wrap:wrap; }
   .collection-share-actions > * { flex:1; justify-content:center; }
   .detail-artist-follow { align-items:flex-start; flex-direction:column; }
+  .nft-provenance { padding:13px; }
+  .nft-provenance dl > div { grid-template-columns:1fr; gap:5px; }
   .nft-chain-activity { padding:13px; }
 }
