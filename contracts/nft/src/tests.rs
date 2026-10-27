@@ -71,6 +71,38 @@ fn unrevealed_creator_mints_keep_placeholder_until_creator_reveals_metadata() {
 }
 
 #[test]
+fn creator_can_register_immutable_onchain_traits_for_marketplace_matching() {
+    let h = setup();
+    let scope = String::from_str(&h.env, "trait-collection");
+    let token_id = h.nft.mint_with_metadata(&h.creator, &scope, &String::from_str(&h.env, "https://example.test/1.json"));
+    let names = soroban_sdk::vec![&h.env, String::from_str(&h.env, "Eyes"), String::from_str(&h.env, "Background")];
+    let values = soroban_sdk::vec![&h.env, String::from_str(&h.env, "Calm"), String::from_str(&h.env, "Blue")];
+    h.nft.set_token_traits(&h.creator, &token_id, &names, &values);
+    assert_eq!(h.nft.token_trait(&token_id, &String::from_str(&h.env, "Eyes")), Some(String::from_str(&h.env, "Calm")));
+    assert!(h.nft.token_traits_registered(&token_id));
+    h.nft.set_token_traits(&h.creator, &token_id, &names, &values);
+}
+
+#[test]
+#[should_panic(expected = "only the collection creator can register token traits")]
+fn non_creator_cannot_register_onchain_traits() {
+    let h = setup();
+    let scope = String::from_str(&h.env, "trait-collection");
+    let token_id = h.nft.mint_with_metadata(&h.creator, &scope, &String::from_str(&h.env, "https://example.test/1.json"));
+    h.nft.set_token_traits(&h.other, &token_id, &soroban_sdk::vec![&h.env, String::from_str(&h.env, "Eyes")], &soroban_sdk::vec![&h.env, String::from_str(&h.env, "Calm")]);
+}
+
+#[test]
+#[should_panic(expected = "registered token traits cannot be changed")]
+fn creator_cannot_change_registered_traits_to_capture_a_trait_offer() {
+    let h = setup();
+    let scope = String::from_str(&h.env, "trait-collection");
+    let token_id = h.nft.mint_with_metadata(&h.creator, &scope, &String::from_str(&h.env, "https://example.test/1.json"));
+    h.nft.set_token_traits(&h.creator, &token_id, &soroban_sdk::vec![&h.env, String::from_str(&h.env, "Eyes")], &soroban_sdk::vec![&h.env, String::from_str(&h.env, "Calm")]);
+    h.nft.set_token_traits(&h.creator, &token_id, &soroban_sdk::vec![&h.env, String::from_str(&h.env, "Eyes")], &soroban_sdk::vec![&h.env, String::from_str(&h.env, "Angry")]);
+}
+
+#[test]
 #[should_panic(expected = "collection belongs to another creator")]
 fn another_creator_cannot_mint_into_an_owned_collection() {
     let h = setup();

@@ -27,6 +27,9 @@ struct MockNft;
 #[contracttype]
 enum MockNftKey {
     Owners(u32),
+    Scope(u32),
+    CollectionOwner(soroban_sdk::String),
+    Trait(u32, soroban_sdk::String),
     Next,
 }
 
@@ -39,12 +42,24 @@ impl MockNft {
         next
     }
 
+    pub fn mint_collection(env: &Env, to: Address, scope: soroban_sdk::String) -> u32 {
+        let token_id = Self::mint(env, to.clone());
+        env.storage().instance().set(&MockNftKey::Scope(token_id), &scope);
+        env.storage().instance().set(&MockNftKey::CollectionOwner(scope), &to);
+        token_id
+    }
+
     pub fn owner_of(env: &Env, token_id: u32) -> Address {
         env.storage()
             .persistent()
             .get(&MockNftKey::Owners(token_id))
             .expect("missing owner")
     }
+
+    pub fn token_scope(env: &Env, token_id: u32) -> Option<soroban_sdk::String> { env.storage().instance().get(&MockNftKey::Scope(token_id)) }
+    pub fn collection_owner(env: &Env, scope: soroban_sdk::String) -> Option<Address> { env.storage().instance().get(&MockNftKey::CollectionOwner(scope)) }
+    pub fn token_trait(env: &Env, token_id: u32, name: soroban_sdk::String) -> Option<soroban_sdk::String> { env.storage().instance().get(&MockNftKey::Trait(token_id, name)) }
+    pub fn set_mock_trait(env: &Env, token_id: u32, name: soroban_sdk::String, value: soroban_sdk::String) { env.storage().instance().set(&MockNftKey::Trait(token_id, name), &value); }
 
     pub fn transfer(env: &Env, from: Address, to: Address, token_id: u32) {
         from.require_auth();
@@ -722,4 +737,125 @@ fn fee_over_max_panics() {
 fn royalty_over_max_panics() {
     let h = setup();
     h.marketplace.set_royalty(&h.royalty_recipient, &5000);
+}
+
+#[test]
+fn expire_offer_refunds_buyer_without_buyer_auth() {
+    let h = setup();
+    let token_id = h.nft.mint(&h.seller);
+    let offer_id = h.marketplace.make_offer(&h.buyer, &h.nft_contract, &token_id, &h.token_contract, &5000, &0);
+    let before = balance(&h, &h.buyer);
+    let expiry = h.marketplace.get_offer(&offer_id).expires_at;
+    h.env.ledger().set_timestamp(expiry as u64);
+    h.marketplace.expire_offer(&offer_id);
+    assert_eq!(balance(&h, &h.buyer), before + 5000);
+    assert!(!h.marketplace.get_offer(&offer_id).active);
+}
+
+#[test]
+fn replace_offer_refunds_and_reescrows_atomically() {
+    let h = setup();
+    let token_id = h.nft.mint(&h.seller);
+    let before = balance(&h, &h.buyer);
+    let old = h.marketplace.make_offer(&h.buyer, &h.nft_contract, &token_id, &h.token_contract, &5000, &0);
+    let replacement = h.marketplace.replace_offer(&old, &h.buyer, &7000);
+    assert_eq!(balance(&h, &h.buyer), before - 7000);
+    assert!(!h.marketplace.get_offer(&old).active);
+    assert_eq!(h.marketplace.get_offer(&replacement).amount, 7000);
+    assert!(h.marketplace.get_offer(&replacement).active);
+}
+
+#[test]
+fn creator_can_set_royalty_only_for_own_collection() {
+    let h = setup();
+    let scope = soroban_sdk::String::from_str(&h.env, "test-collection");
+    let token_id = h.nft.mint_collection(&h.seller, &scope);
+    h.marketplace.set_creator_royalty(&h.nft_contract, &scope, &h.seller, &h.royalty_recipient, &500);
+    let expires = h.env.ledger().sequence() + 1000;
+    let listing_id = h.marketplace.list(&h.seller, &h.nft_contract, &token_id, &h.token_contract, &10_000, &expires);
+    let seller_before = balance(&h, &h.seller);
+    let royalty_before = balance(&h, &h.royalty_recipient);
+    h.marketplace.buy(&listing_id, &h.buyer);
+    assert_eq!(balance(&h, &h.royalty_recipient), royalty_before + 500);
+    assert_eq!(balance(&h, &h.seller), seller_before + 9_400);
+}
+
+#[test]
+#[should_panic(expected = "caller is not the collection creator")]
+fn non_creator_cannot_set_collection_royalty() {
+    let h = setup();
+    let scope = soroban_sdk::String::from_str(&h.env, "test-collection");
+    h.nft.mint_collection(&h.seller, &scope);
+    h.marketplace.set_creator_royalty(&h.nft_contract, &scope, &h.buyer, &h.buyer, &500);
+}
+
+#[test]
+fn seller_can_edit_listing_price_without_releasing_escrow() {
+    let h = setup();
+    let token_id = h.nft.mint(&h.seller);
+    let expires = h.env.ledger().sequence() + 1000;
+    let listing_id = h.marketplace.list(&h.seller, &h.nft_contract, &token_id, &h.token_contract, &1000, &expires);
+    h.marketplace.update_listing(&listing_id, &h.token_contract, &2000, &(expires + 1000));
+    let listing = h.marketplace.get_listing(&listing_id);
+    assert_eq!(listing.price, 2000);
+    assert!(listing.active);
+    assert_eq!(h.nft.owner_of(&token_id), h.marketplace.address);
+}
+
+#[test]
+fn collection_offer_accepts_only_token_in_scope_and_settles() {
+    let h = setup();
+    let scope = soroban_sdk::String::from_str(&h.env, "collection-a");
+    let token_id = h.nft.mint_collection(&h.seller, &scope);
+    let before = balance(&h, &h.buyer);
+    let offer_id = h.marketplace.make_collection_offer(&h.buyer, &h.nft_contract, &scope, &h.token_contract, &5000);
+    assert_eq!(balance(&h, &h.buyer), before - 5000);
+    h.marketplace.accept_collection_offer(&offer_id, &h.seller, &token_id);
+    assert_eq!(h.nft.owner_of(&token_id), h.buyer);
+    assert!(!h.marketplace.get_collection_offer(&offer_id).active);
+}
+
+#[test]
+fn expired_collection_offer_refunds_permissionlessly() {
+    let h = setup();
+    let scope = soroban_sdk::String::from_str(&h.env, "collection-a");
+    let before = balance(&h, &h.buyer);
+    let offer_id = h.marketplace.make_collection_offer(&h.buyer, &h.nft_contract, &scope, &h.token_contract, &5000);
+    let expiry = h.marketplace.get_collection_offer(&offer_id).expires_at;
+    h.env.ledger().set_timestamp(expiry as u64);
+    h.marketplace.expire_collection_offer(&offer_id);
+    assert_eq!(balance(&h, &h.buyer), before);
+    assert!(!h.marketplace.get_collection_offer(&offer_id).active);
+}
+
+#[test]
+fn trait_offer_acceptance_checks_scope_and_committed_trait_then_settles() {
+    let h = setup();
+    let scope = soroban_sdk::String::from_str(&h.env, "trait-set");
+    let token_id = h.nft.mint_collection(&h.seller, &scope);
+    let trait_type = soroban_sdk::String::from_str(&h.env, "Eyes");
+    let trait_value = soroban_sdk::String::from_str(&h.env, "Calm");
+    h.nft.set_mock_trait(&token_id, &trait_type, &trait_value);
+    token::StellarAssetClient::new(&h.env, &h.token_contract).mint(&h.buyer, &10_000);
+    let buyer_before = h.token.balance(&h.buyer);
+    let seller_before = h.token.balance(&h.seller);
+    let offer_id = h.marketplace.make_trait_offer(&h.buyer, &h.nft_contract, &scope, &trait_type, &trait_value, &h.token_contract, &5_000);
+    h.marketplace.accept_trait_offer(&offer_id, &h.seller, &token_id);
+    assert_eq!(h.nft.owner_of(&token_id), h.buyer);
+    assert_eq!(h.token.balance(&h.buyer), buyer_before - 5_000);
+    assert_eq!(h.token.balance(&h.seller), seller_before + 4_950);
+    assert!(!h.marketplace.get_trait_offer(&offer_id).active);
+}
+
+#[test]
+#[should_panic(expected = "token does not match offered trait")]
+fn trait_offer_cannot_be_accepted_by_nonmatching_nft() {
+    let h = setup();
+    let scope = soroban_sdk::String::from_str(&h.env, "trait-set");
+    let token_id = h.nft.mint_collection(&h.seller, &scope);
+    let trait_type = soroban_sdk::String::from_str(&h.env, "Eyes");
+    h.nft.set_mock_trait(&token_id, &trait_type, &soroban_sdk::String::from_str(&h.env, "Angry"));
+    token::StellarAssetClient::new(&h.env, &h.token_contract).mint(&h.buyer, &10_000);
+    let offer_id = h.marketplace.make_trait_offer(&h.buyer, &h.nft_contract, &scope, &trait_type, &soroban_sdk::String::from_str(&h.env, "Calm"), &h.token_contract, &5_000);
+    h.marketplace.accept_trait_offer(&offer_id, &h.seller, &token_id);
 }

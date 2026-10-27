@@ -70,6 +70,9 @@ pub enum DataKey {
     PublicStageFor(String),
     TokenUri(u32),
     TokenScope(u32),
+    TokenTrait(u32, String),
+    TokenTraitsRegistered(u32),
+    TokenTraitCount(u32),
     CollectionOwner(String),
     CollectionRevealed(String),
     CollectionPlaceholder(String),
@@ -227,6 +230,53 @@ impl NftDrop {
     // ---- Ownership ----
     pub fn owner_of(env: &Env, token_id: u32) -> Address {
         env.storage().instance().get(&DataKey::TokenOwner(token_id)).unwrap()
+    }
+
+    /// Public collection provenance for marketplace royalty verification.
+    pub fn token_scope(env: &Env, token_id: u32) -> Option<String> {
+        env.storage().instance().get(&DataKey::TokenScope(token_id))
+    }
+
+    /// Public creator identity for a collection scope.
+    pub fn collection_owner(env: &Env, scope: String) -> Option<Address> {
+        env.storage().instance().get(&DataKey::CollectionOwner(scope))
+    }
+
+    /// The collection creator commits canonical traits once per token. These
+    /// on-chain values let trait offers match artwork without trusting UI text.
+    pub fn set_token_traits(env: &Env, creator: Address, token_id: u32, names: Vec<String>, values: Vec<String>) {
+        creator.require_auth();
+        if names.is_empty() || names.len() > 50 || names.len() != values.len() { panic!("trait batches must contain 1 to 50 matching names and values"); }
+        let scope: String = env.storage().instance().get(&DataKey::TokenScope(token_id)).unwrap_or_else(|| panic!("token has no collection scope"));
+        let owner: Address = env.storage().instance().get(&DataKey::CollectionOwner(scope)).unwrap_or_else(|| panic!("collection creator is not registered"));
+        if owner != creator { panic!("only the collection creator can register token traits"); }
+        let already_registered = env.storage().instance().get::<_, bool>(&DataKey::TokenTraitsRegistered(token_id)).unwrap_or(false);
+        if already_registered && env.storage().instance().get::<_, u32>(&DataKey::TokenTraitCount(token_id)).unwrap_or(0) != names.len() { panic!("registered token traits cannot be changed"); }
+        for index in 0..names.len() {
+            let name = names.get(index).unwrap();
+            let value = values.get(index).unwrap();
+            if name.is_empty() || value.is_empty() { panic!("trait names and values cannot be empty"); }
+            for other in index + 1..names.len() { if names.get(other).unwrap() == name { panic!("duplicate trait category"); } }
+            let key = DataKey::TokenTrait(token_id, name.clone());
+            if already_registered {
+                let existing: Option<String> = env.storage().instance().get(&key);
+                if existing != Some(value) { panic!("registered token traits cannot be changed"); }
+            } else {
+                env.storage().instance().set(&key, &value);
+            }
+        }
+        if !already_registered {
+            env.storage().instance().set(&DataKey::TokenTraitCount(token_id), &names.len());
+            env.storage().instance().set(&DataKey::TokenTraitsRegistered(token_id), &true);
+        }
+    }
+
+    pub fn token_trait(env: &Env, token_id: u32, name: String) -> Option<String> {
+        env.storage().instance().get(&DataKey::TokenTrait(token_id, name))
+    }
+
+    pub fn token_traits_registered(env: &Env, token_id: u32) -> bool {
+        env.storage().instance().get(&DataKey::TokenTraitsRegistered(token_id)).unwrap_or(false)
     }
 
     // ---- Permissionless mint (admin only on-chain) ----
@@ -605,7 +655,9 @@ impl NftDrop {
         let stage_minted: u32 = env.storage().instance().get(&DataKey::StageMinted(stage_id)).unwrap_or(0);
         env.storage().instance().set(&DataKey::StageMinted(stage_id), &(stage_minted + quantity));
 
-        env.events().publish((Symbol::new(env, "stage_mint"), stage_id, to), (start_edition, token_ids.clone()));
+        // Include the actual amount collected by the contract (after any
+        // allowlist price override) so analytics can count primary volume.
+        env.events().publish((Symbol::new(env, "stage_mint"), stage_id, to), (start_edition, token_ids.clone(), price * quantity as i128));
         (start_edition, token_ids)
     }
 

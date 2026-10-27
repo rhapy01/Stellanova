@@ -15,6 +15,7 @@ import {
 } from "./lib/studio-drafts";
 import { archiveCreatorCollection, fetchCreatorArchive } from "./lib/backend";
 import { Button as K, Icon as G } from "./ui";
+import { trackProductEvent } from "./lib/product-analytics";
 const Nt = { GifReader, GifWriter };
 export type TransferAsset = {
   name: string;
@@ -1005,6 +1006,7 @@ function xr({
       }
       let count = Math.min(8, Math.max(1, a.count)), assignments, categories = (a.generationTraits ?? []).map(category => ({ ...category, options: (category.options ?? []).filter(option => option.value.trim() && option.weight > 0) })), failures = [];
       (v(!0), S(``), b(`Preparing the collection trait plan…`));
+      trackProductEvent(`artwork_generation_started`, { studio: `ai-collection`, quantity: count });
       let r = [];
       try {
         const emptyCategories = categories.filter(category => !category.options.length);
@@ -1084,8 +1086,10 @@ function xr({
         const traitIssues = r.filter(candidate => candidate.traitAudit && candidate.traitAudit.checks.some(check => check.status !== `visible`)).length;
         const unchecked = r.filter(candidate => !candidate.traitAudit?.checks.length).length;
         b(`${r.length} artwork variations generated. ${traitIssues ? `${traitIssues} need trait review.` : `Assigned traits checked.`}${unchecked ? ` ${unchecked} AI check${unchecked === 1 ? ` was` : `s were`} unavailable; retry in Review.` : ``}`);
+        trackProductEvent(`artwork_generation_completed`, { studio: `ai-collection`, result: r.length === count ? `success` : r.length ? `partial` : `failed`, quantity: r.length });
         if (failures.length) S(`${r.length} image(s) generated; ${failures.length} rejected by the image provider. The failed item details below identify its prompt and assigned traits:\n\n${failures.join(`\n\n`)}`);
       } catch (e) {
+        trackProductEvent(`artwork_generation_failed`, { studio: `ai-collection`, result: `failed` });
         (S(e instanceof Error ? e.message : `Artwork generation failed.`),
           b(
             r.length
@@ -3008,17 +3012,11 @@ function xr({
             (0, W.jsxs)(`div`, {
               className: `ai-collection-launch__summary`,
               children: [
-                (0, W.jsxs)(`b`, { children: [P.length, ` selected master artworks`] }),
-                (0, W.jsxs)(`span`, {
-                  children: [
-                    a.totalSupply.toLocaleString(),
-                    ` collection supply · `,
-                    a.resolution,
-                    ` × `,
-                    a.resolution,
-                  ],
-                }),
-                (0, W.jsx)(`span`, { children: `Rarity mix: ${getRarityTierCounts(a.totalSupply, a.rarityMix ?? { high: 10, medium: 30, common: 60 }).high.toLocaleString()} high · ${getRarityTierCounts(a.totalSupply, a.rarityMix ?? { high: 10, medium: 30, common: 60 }).medium.toLocaleString()} medium · ${getRarityTierCounts(a.totalSupply, a.rarityMix ?? { high: 10, medium: 30, common: 60 }).common.toLocaleString()} common. Master artworks repeat to fill supply; each edition gets its own rarity metadata.` }),
+                (0, W.jsxs)(`div`, { className: `ai-collection-launch__stat`, children: [(0, W.jsx)(`span`, { children: `Master artworks` }), (0, W.jsxs)(`b`, { children: [P.length, ` selected`] })] }),
+                (0, W.jsxs)(`div`, { className: `ai-collection-launch__stat`, children: [(0, W.jsx)(`span`, { children: `Collection supply` }), (0, W.jsx)(`b`, { children: a.totalSupply.toLocaleString() })] }),
+                (0, W.jsxs)(`div`, { className: `ai-collection-launch__stat`, children: [(0, W.jsx)(`span`, { children: `Artwork size` }), (0, W.jsxs)(`b`, { children: [a.resolution, ` × `, a.resolution] })] }),
+                (0, W.jsxs)(`div`, { className: `ai-collection-launch__stat ai-collection-launch__stat--rarity`, children: [(0, W.jsx)(`span`, { children: `Rarity mix` }), (0, W.jsxs)(`b`, { children: [getRarityTierCounts(a.totalSupply, a.rarityMix ?? { high: 10, medium: 30, common: 60 }).high.toLocaleString(), ` high · `, getRarityTierCounts(a.totalSupply, a.rarityMix ?? { high: 10, medium: 30, common: 60 }).medium.toLocaleString(), ` medium · `, getRarityTierCounts(a.totalSupply, a.rarityMix ?? { high: 10, medium: 30, common: 60 }).common.toLocaleString(), ` common`] })] }),
+                (0, W.jsx)(`p`, { className: `ai-collection-launch__note`, children: `Master artworks repeat to fill supply; each edition gets its own rarity metadata.` }),
               ],
             }),
             (0, W.jsxs)(K, {

@@ -54,7 +54,7 @@ Testnet contract build and deployment scripts are available as npm scripts. They
 
 ## Security
 
-Please do not report vulnerabilities in public issues. Contact the maintainers privately before disclosing a security issue. Never submit real wallet secrets, API tokens, or production credentials.
+Read [SECURITY.md](SECURITY.md) for current controls, known security gaps, and responsible vulnerability reporting. Never submit real wallet secrets, API tokens, or production credentials.
 
 ## License
 

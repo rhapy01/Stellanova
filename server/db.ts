@@ -80,7 +80,109 @@ export async function ensureSchema() {
     const pending = (async () => {
     await db.query(`CREATE TABLE IF NOT EXISTS nftgram_schema (version INT PRIMARY KEY, applied_at TIMESTAMPTZ DEFAULT now())`)
     const currentSchema = await db.query<{ version: number }>('SELECT COALESCE(MAX(version), 0)::int AS version FROM nftgram_schema')
-    if (Number(currentSchema.rows[0]?.version ?? 0) >= 23) return
+    const currentVersion = Number(currentSchema.rows[0]?.version ?? 0)
+    // Referral attribution is additive and must exist even on databases that
+    // already reached the latest numbered schema migration.
+    await db.query(`CREATE TABLE IF NOT EXISTS referral_codes (wallet_address VARCHAR(56) PRIMARY KEY, code VARCHAR(16) NOT NULL UNIQUE, created_at TIMESTAMPTZ NOT NULL DEFAULT now())`)
+    await db.query(`CREATE TABLE IF NOT EXISTS referrals (referred_wallet VARCHAR(56) PRIMARY KEY, referrer_wallet VARCHAR(56) NOT NULL, referral_code VARCHAR(16) NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT now(), activated_at TIMESTAMPTZ, activation_kind VARCHAR(16))`)
+    await db.query(`CREATE TABLE IF NOT EXISTS wallet_accounts (wallet_address VARCHAR(56) PRIMARY KEY, first_seen_at TIMESTAMPTZ NOT NULL DEFAULT now())`)
+    await db.query(`CREATE INDEX IF NOT EXISTS referrals_referrer_created ON referrals (referrer_wallet, created_at DESC)`)
+    await db.query(`CREATE INDEX IF NOT EXISTS referrals_referrer_activated ON referrals (referrer_wallet, activated_at) WHERE activated_at IS NOT NULL`)
+    await db.query(`CREATE TABLE IF NOT EXISTS notifications (id BIGSERIAL PRIMARY KEY, wallet_address VARCHAR(56) NOT NULL, kind VARCHAR(64) NOT NULL, title VARCHAR(255) NOT NULL, body VARCHAR(1000) NOT NULL, action_url TEXT NOT NULL DEFAULT '/account', read_at TIMESTAMPTZ NULL, created_at TIMESTAMPTZ DEFAULT now())`)
+    await db.query(`CREATE TABLE IF NOT EXISTS public_feedback (id BIGSERIAL PRIMARY KEY, category VARCHAR(16) NOT NULL CHECK (category IN ('idea','problem','praise')), title VARCHAR(120) NOT NULL, body VARCHAR(2000) NOT NULL, status VARCHAR(16) NOT NULL DEFAULT 'new' CHECK (status IN ('new','planned','in_progress','done')), created_at TIMESTAMPTZ NOT NULL DEFAULT now())`)
+    await db.query(`CREATE INDEX IF NOT EXISTS public_feedback_created ON public_feedback (created_at DESC)`)
+    // Creator economy pages are additive and must be present on already migrated databases.
+    await db.query(`CREATE TABLE IF NOT EXISTS creator_service_listings (id BIGSERIAL PRIMARY KEY, creator_wallet VARCHAR(56) NOT NULL, title VARCHAR(120) NOT NULL, category VARCHAR(24) NOT NULL CHECK (category IN ('commission','creative_service')), description VARCHAR(3000) NOT NULL, image_url TEXT, pricing_type VARCHAR(16) NOT NULL CHECK (pricing_type IN ('quote','starting_at','fixed')), price_xlm NUMERIC(20,7), availability VARCHAR(32) NOT NULL DEFAULT 'available', delivery_details TEXT, status VARCHAR(16) NOT NULL DEFAULT 'published' CHECK (status IN ('published','paused','sold')), created_at TIMESTAMPTZ NOT NULL DEFAULT now(), updated_at TIMESTAMPTZ NOT NULL DEFAULT now())`)
+    await db.query(`CREATE INDEX IF NOT EXISTS creator_service_listings_discovery ON creator_service_listings (status, category, created_at DESC)`)
+    await db.query(`CREATE TABLE IF NOT EXISTS creator_service_requests (id BIGSERIAL PRIMARY KEY, listing_id BIGINT NOT NULL REFERENCES creator_service_listings(id), buyer_wallet VARCHAR(56) NOT NULL, creator_wallet VARCHAR(56) NOT NULL, brief TEXT NOT NULL, delivery_address TEXT, status VARCHAR(20) NOT NULL DEFAULT 'requested' CHECK (status IN ('requested','accepted','declined','paid','in_progress','shipped','delivered','completed')), agreed_amount_xlm NUMERIC(20,7), transaction_hash VARCHAR(64) UNIQUE, creator_note TEXT, created_at TIMESTAMPTZ NOT NULL DEFAULT now(), updated_at TIMESTAMPTZ NOT NULL DEFAULT now())`)
+    await db.query(`CREATE INDEX IF NOT EXISTS creator_service_requests_parties ON creator_service_requests (LOWER(buyer_wallet), LOWER(creator_wallet), created_at DESC)`)
+    await db.query(`CREATE TABLE IF NOT EXISTS creator_exhibitions (id BIGSERIAL PRIMARY KEY, organizer_wallet VARCHAR(56) NOT NULL, title VARCHAR(160) NOT NULL, description VARCHAR(4000) NOT NULL, venue VARCHAR(180) NOT NULL, street_address VARCHAR(300) NOT NULL, city VARCHAR(120) NOT NULL, region VARCHAR(120), country VARCHAR(120) NOT NULL, starts_at TIMESTAMPTZ NOT NULL, ends_at TIMESTAMPTZ NOT NULL, website_url TEXT, ticket_url TEXT, image_url TEXT, status VARCHAR(16) NOT NULL DEFAULT 'published' CHECK (status IN ('published','cancelled')), created_at TIMESTAMPTZ NOT NULL DEFAULT now(), updated_at TIMESTAMPTZ NOT NULL DEFAULT now())`)
+    await db.query(`CREATE INDEX IF NOT EXISTS creator_exhibitions_discovery ON creator_exhibitions (status, starts_at ASC)`)
+    await db.query(`CREATE TABLE IF NOT EXISTS physical_art_listings (id BIGSERIAL PRIMARY KEY, creator_wallet VARCHAR(56) NOT NULL, title VARCHAR(160) NOT NULL, description VARCHAR(4000) NOT NULL, image_url TEXT NOT NULL, price_xlm NUMERIC(20,7) NOT NULL CHECK(price_xlm > 0), dimensions VARCHAR(120), medium VARCHAR(120), delivery_details VARCHAR(1000) NOT NULL, status VARCHAR(16) NOT NULL DEFAULT 'published' CHECK(status IN ('published','paused','sold')), created_at TIMESTAMPTZ NOT NULL DEFAULT now(), updated_at TIMESTAMPTZ NOT NULL DEFAULT now())`)
+    await db.query(`CREATE INDEX IF NOT EXISTS physical_art_discovery ON physical_art_listings (status, created_at DESC)`)
+    await db.query(`CREATE TABLE IF NOT EXISTS physical_art_orders (id BIGSERIAL PRIMARY KEY, listing_id BIGINT NOT NULL REFERENCES physical_art_listings(id), buyer_wallet VARCHAR(56) NOT NULL, seller_wallet VARCHAR(56) NOT NULL, delivery_address TEXT NOT NULL, status VARCHAR(16) NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','paid','shipped','delivered','completed','cancelled')), transaction_hash VARCHAR(64) UNIQUE, tracking_note VARCHAR(1000), created_at TIMESTAMPTZ NOT NULL DEFAULT now(), updated_at TIMESTAMPTZ NOT NULL DEFAULT now())`)
+    await db.query(`CREATE INDEX IF NOT EXISTS physical_art_orders_parties ON physical_art_orders (LOWER(buyer_wallet), LOWER(seller_wallet), created_at DESC)`)
+    await db.query(`CREATE TABLE IF NOT EXISTS creator_commerce_payments (transaction_hash VARCHAR(64) PRIMARY KEY, payer_wallet VARCHAR(56) NOT NULL, payee_wallet VARCHAR(56) NOT NULL, order_kind VARCHAR(24) NOT NULL, order_id BIGINT NOT NULL, amount_xlm NUMERIC(20,7) NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT now())`)
+    // Browser push was added after the numbered schema migrations. Keep these
+    // additive objects available on already-migrated production databases.
+    await db.query(`CREATE TABLE IF NOT EXISTS browser_push_subscriptions (endpoint TEXT PRIMARY KEY, wallet_address VARCHAR(56) NOT NULL, p256dh VARCHAR(256) NOT NULL, auth VARCHAR(256) NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT now(), updated_at TIMESTAMPTZ NOT NULL DEFAULT now())`)
+    await db.query(`CREATE INDEX IF NOT EXISTS browser_push_subscriptions_wallet ON browser_push_subscriptions (LOWER(wallet_address))`)
+    await db.query(`ALTER TABLE notifications ADD COLUMN IF NOT EXISTS action_url TEXT NOT NULL DEFAULT '/account'`)
+    // Auction indexing was added after the last schema version. Create its
+    // projection before any version-based early return so existing databases
+    // can serve marketplace status and index auction events immediately.
+    await db.query(`CREATE TABLE IF NOT EXISTS marketplace_auctions (auction_id INT NOT NULL, contract_id VARCHAR(56) NOT NULL, seller VARCHAR(56) NOT NULL, nft_contract VARCHAR(56) NOT NULL, token_id INT NOT NULL, payment_token VARCHAR(56) NOT NULL, reserve_price NUMERIC(40,0) NOT NULL, min_increment NUMERIC(40,0) NOT NULL, highest_bid NUMERIC(40,0) NOT NULL DEFAULT 0, highest_bidder VARCHAR(56), starts_at INT NOT NULL, ends_at INT NOT NULL, active BOOLEAN NOT NULL, ledger INT NOT NULL, updated_at TIMESTAMPTZ DEFAULT now(), PRIMARY KEY (contract_id, auction_id))`)
+    await db.query(`CREATE INDEX IF NOT EXISTS auctions_active ON marketplace_auctions (active, ends_at)`)
+    // A replacement Soroban marketplace starts its listing/offer/auction IDs
+    // at zero. Scope every projection key by contract so the new contract can
+    // coexist with the original escrow history without overwriting ID #0, #1…
+    if (currentVersion >= 23) {
+      const recordedMarketplace = await db.query<{ contract_id: string }>(`SELECT contract_id FROM marketplace_events WHERE event_type IN ('list','list_u','sale','cancel','exp_l','offer','offer_s','offer_c','exp_o','auction','auc_s','auc_c','auc_e') GROUP BY contract_id ORDER BY COUNT(*) DESC LIMIT 1`)
+      const oldMarketplace = recordedMarketplace.rows[0]?.contract_id ?? process.env.STELLAR_MARKETPLACE_CONTRACT_ID ?? process.env.VITE_STELLAR_MARKETPLACE_CONTRACT_ID ?? ''
+      await db.query(`ALTER TABLE marketplace_listings ADD COLUMN IF NOT EXISTS contract_id VARCHAR(56) NOT NULL DEFAULT ''`)
+      await db.query(`ALTER TABLE marketplace_offers ADD COLUMN IF NOT EXISTS contract_id VARCHAR(56) NOT NULL DEFAULT ''`)
+      await db.query(`ALTER TABLE marketplace_auctions ADD COLUMN IF NOT EXISTS contract_id VARCHAR(56) NOT NULL DEFAULT ''`)
+      await db.query(`CREATE TABLE IF NOT EXISTS marketplace_collection_offers (offer_id INT NOT NULL, contract_id VARCHAR(56) NOT NULL, buyer VARCHAR(56) NOT NULL, nft_contract VARCHAR(56) NOT NULL, collection_scope VARCHAR(255) NOT NULL, payment_token VARCHAR(56) NOT NULL, amount NUMERIC(40,0) NOT NULL, expires_at BIGINT NOT NULL, active BOOLEAN NOT NULL, ledger INT NOT NULL, updated_at TIMESTAMPTZ DEFAULT now(), PRIMARY KEY (contract_id, offer_id))`)
+      await db.query(`CREATE TABLE IF NOT EXISTS marketplace_trait_offers (offer_id INT NOT NULL, contract_id VARCHAR(56) NOT NULL, buyer VARCHAR(56) NOT NULL, nft_contract VARCHAR(56) NOT NULL, collection_scope VARCHAR(255) NOT NULL, trait_type VARCHAR(160) NOT NULL, trait_value VARCHAR(255) NOT NULL, payment_token VARCHAR(56) NOT NULL, amount NUMERIC(40,0) NOT NULL, expires_at BIGINT NOT NULL, active BOOLEAN NOT NULL, ledger INT NOT NULL, updated_at TIMESTAMPTZ DEFAULT now(), PRIMARY KEY (contract_id, offer_id))`)
+      await db.query(`CREATE TABLE IF NOT EXISTS marketplace_offer_responses (offer_id INT NOT NULL, contract_id VARCHAR(56) NOT NULL, seller VARCHAR(56) NOT NULL, buyer VARCHAR(56) NOT NULL, status VARCHAR(24) NOT NULL, counter_amount NUMERIC(40,0), updated_at TIMESTAMPTZ DEFAULT now(), PRIMARY KEY (contract_id, offer_id))`)
+      await db.query(`ALTER TABLE marketplace_offer_responses ADD COLUMN IF NOT EXISTS contract_id VARCHAR(56) NOT NULL DEFAULT ''`)
+      await db.query(`UPDATE marketplace_listings SET contract_id=$1 WHERE contract_id=''`, [oldMarketplace])
+      await db.query(`UPDATE marketplace_offers SET contract_id=$1 WHERE contract_id=''`, [oldMarketplace])
+      await db.query(`UPDATE marketplace_auctions SET contract_id=$1 WHERE contract_id=''`, [oldMarketplace])
+      await db.query(`UPDATE marketplace_offer_responses SET contract_id=$1 WHERE contract_id=''`, [oldMarketplace])
+      await db.query(`DO $$ DECLARE c TEXT; BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid='marketplace_listings'::regclass AND conname='marketplace_listings_contract_listing_pk') THEN
+          SELECT conname INTO c FROM pg_constraint WHERE conrelid='marketplace_listings'::regclass AND contype='p'; IF c IS NOT NULL THEN EXECUTE format('ALTER TABLE marketplace_listings DROP CONSTRAINT %I', c); END IF;
+          ALTER TABLE marketplace_listings ADD CONSTRAINT marketplace_listings_contract_listing_pk PRIMARY KEY (contract_id, listing_id);
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid='marketplace_offers'::regclass AND conname='marketplace_offers_contract_offer_pk') THEN
+          SELECT conname INTO c FROM pg_constraint WHERE conrelid='marketplace_offers'::regclass AND contype='p'; IF c IS NOT NULL THEN EXECUTE format('ALTER TABLE marketplace_offers DROP CONSTRAINT %I', c); END IF;
+          ALTER TABLE marketplace_offers ADD CONSTRAINT marketplace_offers_contract_offer_pk PRIMARY KEY (contract_id, offer_id);
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid='marketplace_auctions'::regclass AND conname='marketplace_auctions_contract_auction_pk') THEN
+          SELECT conname INTO c FROM pg_constraint WHERE conrelid='marketplace_auctions'::regclass AND contype='p'; IF c IS NOT NULL THEN EXECUTE format('ALTER TABLE marketplace_auctions DROP CONSTRAINT %I', c); END IF;
+          ALTER TABLE marketplace_auctions ADD CONSTRAINT marketplace_auctions_contract_auction_pk PRIMARY KEY (contract_id, auction_id);
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid='marketplace_offer_responses'::regclass AND conname='marketplace_offer_responses_contract_offer_pk') THEN
+          SELECT conname INTO c FROM pg_constraint WHERE conrelid='marketplace_offer_responses'::regclass AND contype='p'; IF c IS NOT NULL THEN EXECUTE format('ALTER TABLE marketplace_offer_responses DROP CONSTRAINT %I', c); END IF;
+          ALTER TABLE marketplace_offer_responses ADD CONSTRAINT marketplace_offer_responses_contract_offer_pk PRIMARY KEY (contract_id, offer_id);
+        END IF;
+      END $$`)
+      await db.query(`ALTER TABLE marketplace_listings ALTER COLUMN contract_id DROP DEFAULT`)
+      await db.query(`ALTER TABLE marketplace_offers ALTER COLUMN contract_id DROP DEFAULT`)
+      await db.query(`ALTER TABLE marketplace_auctions ALTER COLUMN contract_id DROP DEFAULT`)
+      await db.query(`ALTER TABLE marketplace_offer_responses ALTER COLUMN contract_id DROP DEFAULT`)
+    }
+    // Provenance was added after schema 25 without incrementing the schema
+    // version. Existing deployments therefore skipped the ALTER below and
+    // failed on queries selecting/inserting creator_nft_metadata.provenance.
+    // Apply this additive migration before early returns for established DBs.
+    if (currentVersion >= 23) {
+      await db.query(`ALTER TABLE creator_nft_metadata ADD COLUMN IF NOT EXISTS provenance JSONB NOT NULL DEFAULT '{}'::jsonb`)
+      await db.query(`INSERT INTO nftgram_schema (version) VALUES (26) ON CONFLICT (version) DO NOTHING`)
+    }
+    if (currentVersion >= 26) {
+      await db.query(`ALTER TABLE stage_mint_events ADD COLUMN IF NOT EXISTS paid_stroops NUMERIC(40,0)`)
+      await db.query(`CREATE TABLE IF NOT EXISTS creator_stories (id BIGSERIAL PRIMARY KEY, creator_wallet VARCHAR(56) NOT NULL, media_url VARCHAR(1024) NOT NULL DEFAULT '', media_type VARCHAR(16) NOT NULL DEFAULT 'image', caption VARCHAR(500) NOT NULL DEFAULT '', created_at TIMESTAMPTZ NOT NULL DEFAULT now(), expires_at TIMESTAMPTZ NOT NULL)`)
+      await db.query(`CREATE INDEX IF NOT EXISTS creator_stories_expiry ON creator_stories (creator_wallet, expires_at DESC)`)
+      await db.query(`CREATE TABLE IF NOT EXISTS story_views (story_kind VARCHAR(16) NOT NULL, story_id BIGINT NOT NULL, viewer_wallet VARCHAR(56) NOT NULL, viewed_at TIMESTAMPTZ NOT NULL DEFAULT now(), PRIMARY KEY (story_kind, story_id, viewer_wallet))`)
+      return
+    }
+    // These objects were added after schema 23 without a version bump, so
+    // existing databases returned early and missed them. Repair with narrow,
+    // idempotent migrations instead of replaying the full initial schema.
+    if (currentVersion >= 23) {
+      await db.query(`ALTER TABLE stage_mint_events ADD COLUMN IF NOT EXISTS paid_stroops NUMERIC(40,0)`)
+      await db.query(`CREATE TABLE IF NOT EXISTS post_tips (tx_hash VARCHAR(64) PRIMARY KEY, post_id BIGINT NOT NULL, sender VARCHAR(56) NOT NULL, recipient VARCHAR(56) NOT NULL, amount_xlm DECIMAL(18,7) NOT NULL, ledger INT NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT now())`)
+      await db.query(`CREATE INDEX IF NOT EXISTS post_tips_post_created ON post_tips (post_id, created_at DESC)`)
+      await db.query(`CREATE TABLE IF NOT EXISTS creator_stories (id BIGSERIAL PRIMARY KEY, creator_wallet VARCHAR(56) NOT NULL, media_url VARCHAR(1024) NOT NULL DEFAULT '', media_type VARCHAR(16) NOT NULL DEFAULT 'image', caption VARCHAR(500) NOT NULL DEFAULT '', created_at TIMESTAMPTZ NOT NULL DEFAULT now(), expires_at TIMESTAMPTZ NOT NULL)`)
+      await db.query(`CREATE INDEX IF NOT EXISTS creator_stories_expiry ON creator_stories (creator_wallet, expires_at DESC)`)
+      await db.query(`CREATE TABLE IF NOT EXISTS story_views (story_kind VARCHAR(16) NOT NULL, story_id BIGINT NOT NULL, viewer_wallet VARCHAR(56) NOT NULL, viewed_at TIMESTAMPTZ NOT NULL DEFAULT now(), PRIMARY KEY (story_kind, story_id, viewer_wallet))`)
+      await db.query(`ALTER TABLE creator_media_uploads ADD COLUMN IF NOT EXISTS sha256_verified BOOLEAN NOT NULL DEFAULT FALSE`)
+      await db.query(`INSERT INTO nftgram_schema (version) VALUES (24) ON CONFLICT (version) DO NOTHING`)
+      await db.query(`INSERT INTO nftgram_schema (version) VALUES (25) ON CONFLICT (version) DO NOTHING`)
+      return
+    }
     const statements = [
       `CREATE TABLE IF NOT EXISTS collection_subscriptions (wallet_address VARCHAR(56) NOT NULL, collection_id VARCHAR(128) NOT NULL, created_at TIMESTAMPTZ DEFAULT now(), PRIMARY KEY (wallet_address, collection_id))`,
       `CREATE TABLE IF NOT EXISTS collection_likes (wallet_address VARCHAR(56) NOT NULL, collection_id VARCHAR(128) NOT NULL, created_at TIMESTAMPTZ DEFAULT now(), PRIMARY KEY (wallet_address, collection_id))`,
@@ -93,19 +195,27 @@ export async function ensureSchema() {
       `CREATE TABLE IF NOT EXISTS nft_bookmarks (wallet_address VARCHAR(56) NOT NULL, nft_id VARCHAR(128) NOT NULL, created_at TIMESTAMPTZ DEFAULT now(), PRIMARY KEY (wallet_address, nft_id))`,
       `ALTER TABLE nft_comments ADD COLUMN IF NOT EXISTS parent_id BIGINT`,
       `CREATE INDEX IF NOT EXISTS nft_comments_item ON nft_comments (nft_id, created_at)`,
-      `CREATE TABLE IF NOT EXISTS notifications (id BIGSERIAL PRIMARY KEY, wallet_address VARCHAR(56) NOT NULL, kind VARCHAR(64) NOT NULL, title VARCHAR(255) NOT NULL, body VARCHAR(1000) NOT NULL, read_at TIMESTAMPTZ NULL, created_at TIMESTAMPTZ DEFAULT now())`,
+      `CREATE TABLE IF NOT EXISTS notifications (id BIGSERIAL PRIMARY KEY, wallet_address VARCHAR(56) NOT NULL, kind VARCHAR(64) NOT NULL, title VARCHAR(255) NOT NULL, body VARCHAR(1000) NOT NULL, action_url TEXT NOT NULL DEFAULT '/account', read_at TIMESTAMPTZ NULL, created_at TIMESTAMPTZ DEFAULT now())`,
       `CREATE INDEX IF NOT EXISTS notifications_wallet ON notifications (wallet_address, created_at)`,
+      `CREATE TABLE IF NOT EXISTS browser_push_subscriptions (endpoint TEXT PRIMARY KEY, wallet_address VARCHAR(56) NOT NULL, p256dh VARCHAR(256) NOT NULL, auth VARCHAR(256) NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT now(), updated_at TIMESTAMPTZ NOT NULL DEFAULT now())`,
+      `CREATE INDEX IF NOT EXISTS browser_push_subscriptions_wallet ON browser_push_subscriptions (LOWER(wallet_address))`,
       `CREATE TABLE IF NOT EXISTS nft_ownership (contract_id VARCHAR(56) NOT NULL, token_id INT NOT NULL, owner_address VARCHAR(56) NOT NULL, ledger INT NOT NULL, updated_at TIMESTAMPTZ DEFAULT now(), PRIMARY KEY (contract_id, token_id))`,
       `CREATE TABLE IF NOT EXISTS verified_nft_mints (contract_id VARCHAR(56) NOT NULL, token_id INT NOT NULL, minter VARCHAR(56) NOT NULL, tx_hash VARCHAR(64) NOT NULL, ledger INT NOT NULL, created_at TIMESTAMPTZ DEFAULT now(), PRIMARY KEY (contract_id, token_id))`,
-      `CREATE TABLE IF NOT EXISTS stage_mint_events (contract_id VARCHAR(56) NOT NULL, tx_hash VARCHAR(64) NOT NULL, stage_id INT NOT NULL, wallet VARCHAR(56) NOT NULL, token_ids INT[] NOT NULL, ledger INT NOT NULL, PRIMARY KEY (contract_id, tx_hash, stage_id))`,
+      `CREATE TABLE IF NOT EXISTS stage_mint_events (contract_id VARCHAR(56) NOT NULL, tx_hash VARCHAR(64) NOT NULL, stage_id INT NOT NULL, wallet VARCHAR(56) NOT NULL, token_ids INT[] NOT NULL, ledger INT NOT NULL, paid_stroops NUMERIC(40,0), PRIMARY KEY (contract_id, tx_hash, stage_id))`,
+      `ALTER TABLE stage_mint_events ADD COLUMN IF NOT EXISTS paid_stroops NUMERIC(40,0)`,
       `CREATE INDEX IF NOT EXISTS nft_ownership_owner ON nft_ownership (owner_address)`,
-      `CREATE TABLE IF NOT EXISTS marketplace_listings (listing_id INT PRIMARY KEY, seller VARCHAR(56) NOT NULL, nft_contract VARCHAR(56) NOT NULL, token_id INT NOT NULL, payment_token VARCHAR(56) NOT NULL, price NUMERIC(40,0) NOT NULL, expires_at INT NOT NULL, active BOOLEAN NOT NULL, ledger INT NOT NULL, updated_at TIMESTAMPTZ DEFAULT now())`,
+      `CREATE TABLE IF NOT EXISTS marketplace_listings (listing_id INT NOT NULL, contract_id VARCHAR(56) NOT NULL, seller VARCHAR(56) NOT NULL, nft_contract VARCHAR(56) NOT NULL, token_id INT NOT NULL, payment_token VARCHAR(56) NOT NULL, price NUMERIC(40,0) NOT NULL, expires_at INT NOT NULL, active BOOLEAN NOT NULL, ledger INT NOT NULL, updated_at TIMESTAMPTZ DEFAULT now(), PRIMARY KEY (contract_id, listing_id))`,
       `CREATE INDEX IF NOT EXISTS listings_active ON marketplace_listings (active, expires_at)`,
-      `CREATE TABLE IF NOT EXISTS marketplace_offers (offer_id INT PRIMARY KEY, buyer VARCHAR(56) NOT NULL, nft_contract VARCHAR(56) NOT NULL, token_id INT NOT NULL, payment_token VARCHAR(56) NOT NULL, amount NUMERIC(40,0) NOT NULL, expires_at BIGINT NOT NULL, active BOOLEAN NOT NULL, ledger INT NOT NULL, updated_at TIMESTAMPTZ DEFAULT now())`,
+      `CREATE TABLE IF NOT EXISTS marketplace_auctions (auction_id INT NOT NULL, contract_id VARCHAR(56) NOT NULL, seller VARCHAR(56) NOT NULL, nft_contract VARCHAR(56) NOT NULL, token_id INT NOT NULL, payment_token VARCHAR(56) NOT NULL, reserve_price NUMERIC(40,0) NOT NULL, min_increment NUMERIC(40,0) NOT NULL, highest_bid NUMERIC(40,0) NOT NULL DEFAULT 0, highest_bidder VARCHAR(56), starts_at INT NOT NULL, ends_at INT NOT NULL, active BOOLEAN NOT NULL, ledger INT NOT NULL, updated_at TIMESTAMPTZ DEFAULT now(), PRIMARY KEY (contract_id, auction_id))`,
+      `CREATE INDEX IF NOT EXISTS auctions_active ON marketplace_auctions (active, ends_at)`,
+      `CREATE TABLE IF NOT EXISTS marketplace_offers (offer_id INT NOT NULL, contract_id VARCHAR(56) NOT NULL, buyer VARCHAR(56) NOT NULL, nft_contract VARCHAR(56) NOT NULL, token_id INT NOT NULL, payment_token VARCHAR(56) NOT NULL, amount NUMERIC(40,0) NOT NULL, expires_at BIGINT NOT NULL, active BOOLEAN NOT NULL, ledger INT NOT NULL, updated_at TIMESTAMPTZ DEFAULT now(), PRIMARY KEY (contract_id, offer_id))`,
+      `CREATE TABLE IF NOT EXISTS marketplace_collection_offers (offer_id INT NOT NULL, contract_id VARCHAR(56) NOT NULL, buyer VARCHAR(56) NOT NULL, nft_contract VARCHAR(56) NOT NULL, collection_scope VARCHAR(255) NOT NULL, payment_token VARCHAR(56) NOT NULL, amount NUMERIC(40,0) NOT NULL, expires_at BIGINT NOT NULL, active BOOLEAN NOT NULL, ledger INT NOT NULL, updated_at TIMESTAMPTZ DEFAULT now(), PRIMARY KEY (contract_id, offer_id))`,
+      `CREATE TABLE IF NOT EXISTS marketplace_trait_offers (offer_id INT NOT NULL, contract_id VARCHAR(56) NOT NULL, buyer VARCHAR(56) NOT NULL, nft_contract VARCHAR(56) NOT NULL, collection_scope VARCHAR(255) NOT NULL, trait_type VARCHAR(160) NOT NULL, trait_value VARCHAR(255) NOT NULL, payment_token VARCHAR(56) NOT NULL, amount NUMERIC(40,0) NOT NULL, expires_at BIGINT NOT NULL, active BOOLEAN NOT NULL, ledger INT NOT NULL, updated_at TIMESTAMPTZ DEFAULT now(), PRIMARY KEY (contract_id, offer_id))`,
+      `CREATE INDEX IF NOT EXISTS collection_offers_active ON marketplace_collection_offers (active, expires_at)`,
       `ALTER TABLE marketplace_offers ALTER COLUMN expires_at TYPE BIGINT USING expires_at::BIGINT`,
       `ALTER TABLE marketplace_offers ADD COLUMN IF NOT EXISTS contract_id VARCHAR(56) NOT NULL DEFAULT ''`,
       `ALTER TABLE marketplace_offers ALTER COLUMN contract_id DROP DEFAULT`,
-      `CREATE TABLE IF NOT EXISTS marketplace_offer_responses (offer_id INT PRIMARY KEY, seller VARCHAR(56) NOT NULL, buyer VARCHAR(56) NOT NULL, status VARCHAR(24) NOT NULL, counter_amount NUMERIC(40,0), updated_at TIMESTAMPTZ DEFAULT now())`,
+      `CREATE TABLE IF NOT EXISTS marketplace_offer_responses (offer_id INT NOT NULL, contract_id VARCHAR(56) NOT NULL, seller VARCHAR(56) NOT NULL, buyer VARCHAR(56) NOT NULL, status VARCHAR(24) NOT NULL, counter_amount NUMERIC(40,0), updated_at TIMESTAMPTZ DEFAULT now(), PRIMARY KEY (contract_id, offer_id))`,
       `CREATE INDEX IF NOT EXISTS offers_active ON marketplace_offers (active, expires_at)`,
       `ALTER TABLE marketplace_offers ADD COLUMN IF NOT EXISTS expiry_reminder_sent_at TIMESTAMPTZ NULL`,
       `CREATE TABLE IF NOT EXISTS marketplace_events (id BIGSERIAL PRIMARY KEY, event_key VARCHAR(255) NOT NULL UNIQUE, event_type VARCHAR(64) NOT NULL, contract_id VARCHAR(56) NOT NULL, tx_hash VARCHAR(64) NOT NULL, ledger INT NOT NULL, payload JSONB NOT NULL, created_at TIMESTAMPTZ DEFAULT now())`,
@@ -118,6 +228,9 @@ export async function ensureSchema() {
       `CREATE TABLE IF NOT EXISTS posts (id BIGSERIAL PRIMARY KEY, author VARCHAR(128) NOT NULL, author_name VARCHAR(128) NOT NULL DEFAULT '', avatar VARCHAR(512) NOT NULL DEFAULT '', media_url VARCHAR(1024) NOT NULL DEFAULT '', media_type VARCHAR(32) NOT NULL DEFAULT 'image', caption VARCHAR(1000) NOT NULL DEFAULT '', linked_nft_id VARCHAR(128), post_kind VARCHAR(16) NOT NULL DEFAULT 'post', price_xlm DECIMAL(18,7), created_at TIMESTAMPTZ DEFAULT now())`,
       `CREATE TABLE IF NOT EXISTS collection_stories (id BIGSERIAL PRIMARY KEY, collection_id VARCHAR(128) NOT NULL, owner_wallet VARCHAR(56) NOT NULL, media_url VARCHAR(1024) NOT NULL DEFAULT '', media_type VARCHAR(16) NOT NULL DEFAULT 'image', caption VARCHAR(500) NOT NULL DEFAULT '', created_at TIMESTAMPTZ NOT NULL DEFAULT now(), expires_at TIMESTAMPTZ NOT NULL)`,
       `CREATE INDEX IF NOT EXISTS collection_stories_expiry ON collection_stories (collection_id, expires_at DESC)`,
+      `CREATE TABLE IF NOT EXISTS creator_stories (id BIGSERIAL PRIMARY KEY, creator_wallet VARCHAR(56) NOT NULL, media_url VARCHAR(1024) NOT NULL DEFAULT '', media_type VARCHAR(16) NOT NULL DEFAULT 'image', caption VARCHAR(500) NOT NULL DEFAULT '', created_at TIMESTAMPTZ NOT NULL DEFAULT now(), expires_at TIMESTAMPTZ NOT NULL)`,
+      `CREATE INDEX IF NOT EXISTS creator_stories_expiry ON creator_stories (creator_wallet, expires_at DESC)`,
+      `CREATE TABLE IF NOT EXISTS story_views (story_kind VARCHAR(16) NOT NULL, story_id BIGINT NOT NULL, viewer_wallet VARCHAR(56) NOT NULL, viewed_at TIMESTAMPTZ NOT NULL DEFAULT now(), PRIMARY KEY (story_kind, story_id, viewer_wallet))`,
       `CREATE INDEX IF NOT EXISTS posts_author ON posts (author)`,
       `CREATE INDEX IF NOT EXISTS posts_created ON posts (created_at DESC)`,
       `ALTER TABLE posts ADD COLUMN IF NOT EXISTS is_demo BOOLEAN NOT NULL DEFAULT FALSE`,
@@ -135,6 +248,8 @@ export async function ensureSchema() {
       `CREATE INDEX IF NOT EXISTS post_comments_post ON post_comments (post_id, created_at)`,
       `CREATE TABLE IF NOT EXISTS creator_follows (wallet_address VARCHAR(56) NOT NULL, creator_id VARCHAR(128) NOT NULL, created_at TIMESTAMPTZ DEFAULT now(), PRIMARY KEY (wallet_address, creator_id))`,
       `CREATE TABLE IF NOT EXISTS post_reposts (wallet_address VARCHAR(56) NOT NULL, post_id BIGINT NOT NULL, created_at TIMESTAMPTZ DEFAULT now(), PRIMARY KEY (wallet_address, post_id))`,
+      `CREATE TABLE IF NOT EXISTS post_tips (tx_hash VARCHAR(64) PRIMARY KEY, post_id BIGINT NOT NULL, sender VARCHAR(56) NOT NULL, recipient VARCHAR(56) NOT NULL, amount_xlm DECIMAL(18,7) NOT NULL, ledger INT NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT now())`,
+      `CREATE INDEX IF NOT EXISTS post_tips_post_created ON post_tips (post_id, created_at DESC)`,
       `CREATE TABLE IF NOT EXISTS user_profiles (wallet_address VARCHAR(56) PRIMARY KEY, display_name VARCHAR(80) NOT NULL DEFAULT '', avatar VARCHAR(512) NOT NULL DEFAULT '', bio VARCHAR(500) NOT NULL DEFAULT '', is_creator BOOLEAN NOT NULL DEFAULT FALSE, is_admin BOOLEAN NOT NULL DEFAULT FALSE, is_verified BOOLEAN NOT NULL DEFAULT FALSE, created_at TIMESTAMPTZ DEFAULT now(), updated_at TIMESTAMPTZ DEFAULT now())`,
       `ALTER TABLE user_profiles ADD COLUMN IF NOT EXISTS welcome_email_sent_at TIMESTAMPTZ`,
       `UPDATE user_profiles SET welcome_email_sent_at = now() WHERE welcome_email_sent_at IS NULL`,
@@ -244,6 +359,9 @@ export async function ensureSchema() {
     await db.query(`ALTER TABLE ops_reconciliation_runs ADD COLUMN IF NOT EXISTS metadata_repaired INT NOT NULL DEFAULT 0`)
     await db.query(`ALTER TABLE ops_reconciliation_runs ADD COLUMN IF NOT EXISTS metadata_failed INT NOT NULL DEFAULT 0`)
     await db.query(`INSERT INTO nftgram_schema (version) VALUES (23) ON CONFLICT (version) DO NOTHING`)
+    await db.query(`INSERT INTO nftgram_schema (version) VALUES (24) ON CONFLICT (version) DO NOTHING`)
+    await db.query(`INSERT INTO nftgram_schema (version) VALUES (25) ON CONFLICT (version) DO NOTHING`)
+    await db.query(`INSERT INTO nftgram_schema (version) VALUES (26) ON CONFLICT (version) DO NOTHING`)
     })()
     schemaReady = pending.catch((error) => {
       // A transient Neon cold-start timeout must not poison schema setup for

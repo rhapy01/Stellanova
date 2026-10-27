@@ -10,9 +10,19 @@ export type SorobanMarketplaceConfig = {
   paymentToken?: string
 }
 
+export type StellarPaymentAsset = { code: string; contractId: string; decimals: number }
+export const stellarPaymentAssets: StellarPaymentAsset[] = [
+  { code: 'XLM', contractId: import.meta.env.VITE_STELLAR_PAYMENT_TOKEN ?? 'CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC', decimals: 7 },
+  ...(import.meta.env.VITE_STELLAR_PAYMENT_TOKENS ?? '').split(',').map((entry: string) => {
+    const [code, contractId, rawDecimals] = entry.trim().split(':')
+    const decimals = rawDecimals === undefined ? 7 : Number(rawDecimals)
+    return code && contractId && Number.isInteger(decimals) && decimals >= 0 && decimals <= 18 ? { code: code.toUpperCase(), contractId, decimals } : null
+  }).filter((asset: StellarPaymentAsset | null): asset is StellarPaymentAsset => Boolean(asset)),
+].filter((asset, index, assets) => assets.findIndex((candidate) => candidate.contractId === asset.contractId) === index)
+
 export const sorobanMarketplaceConfig: SorobanMarketplaceConfig = {
   nftContractId: import.meta.env.VITE_STELLAR_NFT_CONTRACT_ID ?? 'CDEESFFVHROBZDWVK7CCKTUFGGATKIZOIOS4BHA7V6ENRF3W25C6FBOR',
-  marketplaceContractId: import.meta.env.VITE_STELLAR_MARKETPLACE_CONTRACT_ID ?? 'CBITVCCK4VLVRIUJ35YD6VTR7IAYWZJG3NBEQ6NTO2367YTMHSGQY3Y6',
+  marketplaceContractId: import.meta.env.VITE_STELLAR_MARKETPLACE_CONTRACT_ID ?? 'CDQJZ6TKAAUIZW7AMH7XKECRHNVDU4REGMWU7RLJGM5AHIQYZS7GC6TL',
   paymentToken: import.meta.env.VITE_STELLAR_PAYMENT_TOKEN ?? 'CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC',
 }
 

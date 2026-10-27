@@ -1,13 +1,20 @@
 {
   "name": "StellaNova — Daily visual marketplace for the next collectible",
   "short_name": "StellaNova",
+  "id": "/",
   "description": "A daily visual marketplace for the next collectible.",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",
+  "display_override": ["standalone", "minimal-ui"],
   "background_color": "#11131d",
   "theme_color": "#11131d",
   "orientation": "portrait-primary",
+  "categories": ["art", "social", "shopping"],
+  "shortcuts": [
+    { "name": "Explore artwork", "short_name": "Explore", "url": "/explore", "icons": [{ "src": "/icon-192.png", "sizes": "192x192", "type": "image/png" }] },
+    { "name": "Browse collections", "short_name": "Collections", "url": "/collections", "icons": [{ "src": "/icon-192.png", "sizes": "192x192", "type": "image/png" }] }
+  ],
   "icons": [
     { "src": "/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
     { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" }

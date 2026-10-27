@@ -4,9 +4,10 @@ import { createHash } from 'node:crypto'
 import * as StellarSdk from '@stellar/stellar-sdk'
 import { ensureSchema, query, withTransaction } from './db.js'
 import { mailConfigured, marketplaceEmail, sendMail } from './mail.js'
+import { notifyUser } from './push.js'
 
 const rpcUrl = process.env.STELLAR_RPC_URL ?? process.env.VITE_SOROBAN_RPC_URL ?? 'https://soroban-testnet.stellar.org'
-const marketplaceId = process.env.STELLAR_MARKETPLACE_CONTRACT_ID ?? process.env.VITE_STELLAR_MARKETPLACE_CONTRACT_ID ?? 'CBITVCCK4VLVRIUJ35YD6VTR7IAYWZJG3NBEQ6NTO2367YTMHSGQY3Y6'
+const marketplaceId = process.env.STELLAR_MARKETPLACE_CONTRACT_ID ?? process.env.VITE_STELLAR_MARKETPLACE_CONTRACT_ID ?? 'CDQJZ6TKAAUIZW7AMH7XKECRHNVDU4REGMWU7RLJGM5AHIQYZS7GC6TL'
 const nftId = process.env.STELLAR_NFT_CONTRACT_ID ?? process.env.VITE_STELLAR_NFT_CONTRACT_ID ?? 'CDEESFFVHROBZDWVK7CCKTUFGGATKIZOIOS4BHA7V6ENRF3W25C6FBOR'
 let nftContractIds = new Set<string>(nftId ? [nftId] : [])
 let cursor = Number(process.env.STELLAR_INDEXER_START_LEDGER ?? 0)
@@ -121,7 +122,7 @@ export async function sendOfferExpiryReminders() {
       const delivered = await emailWallet(offer.buyer, `Offer expired · ${title}`, message, nftUrl)
       if (delivered) {
         await notifyWallet(offer.buyer, 'offer_expired', 'Your offer expired', `Offer #${offer.offer_id} expired. Cancel it to reclaim escrow; funds are not returned automatically.`)
-        await query('UPDATE marketplace_offers SET expiry_reminder_sent_at = now() WHERE offer_id = ? AND expiry_reminder_sent_at IS NULL', [offer.offer_id])
+        await query('UPDATE marketplace_offers SET expiry_reminder_sent_at = now() WHERE contract_id = ? AND offer_id = ? AND expiry_reminder_sent_at IS NULL', [marketplaceId, offer.offer_id])
       }
     }
   } finally {
@@ -150,6 +151,12 @@ function eventKeyFrom(value: string): string {
   return createHash('sha256').update(value).digest('hex').slice(0, 64)
 }
 
+async function activateReferral(wallet: unknown, kind: 'mint' | 'collect') {
+  const address = String(wallet ?? '')
+  if (!/^G[A-Z2-7]{55}$/.test(address)) return
+  await query('UPDATE referrals SET activated_at = now(), activation_kind = ? WHERE LOWER(referred_wallet) = LOWER(?) AND activated_at IS NULL', [kind, address])
+}
+
 async function applyEvent(event: any) {
   const contractId = String(event.contractId ?? '')
   const txHash = String(event.txHash ?? '')
@@ -165,22 +172,25 @@ async function applyEvent(event: any) {
   if (contractId === marketplaceId && Array.isArray(data)) {
     if (eventType === 'list' && data.length >= 7) {
       await query(
-        'INSERT INTO marketplace_listings (listing_id, seller, nft_contract, token_id, payment_token, price, expires_at, active, ledger) VALUES (?, ?, ?, ?, ?, ?, ?, TRUE, ?) ON CONFLICT (listing_id) DO UPDATE SET active=TRUE, price=EXCLUDED.price, expires_at=EXCLUDED.expires_at, ledger=EXCLUDED.ledger',
-        [data[0], data[1], data[2], data[3], data[4], data[5], data[6], ledger],
+        'INSERT INTO marketplace_listings (listing_id, contract_id, seller, nft_contract, token_id, payment_token, price, expires_at, active, ledger) VALUES (?, ?, ?, ?, ?, ?, ?, ?, TRUE, ?) ON CONFLICT (contract_id, listing_id) DO UPDATE SET active=TRUE, price=EXCLUDED.price, expires_at=EXCLUDED.expires_at, ledger=EXCLUDED.ledger',
+        [data[0], contractId, data[1], data[2], data[3], data[4], data[5], data[6], ledger],
       )
+    } else if (eventType === 'list_u' && data.length >= 7) {
+      await query('UPDATE marketplace_listings SET payment_token=?, price=?, expires_at=?, ledger=?, updated_at=now() WHERE contract_id=? AND listing_id=? AND active=TRUE', [data[4], data[5], data[6], ledger, contractId, data[0]])
     } else if (eventType === 'sale' && data.length >= 6) {
-      await query('UPDATE marketplace_listings SET active=FALSE, ledger=? WHERE listing_id=?', [ledger, data[0]])
+      await query('UPDATE marketplace_listings SET active=FALSE, ledger=? WHERE contract_id=? AND listing_id=?', [ledger, contractId, data[0]])
       await upsertOwnership(data[3], data[4], data[1], ledger)
+      await activateReferral(data[1], 'collect')
       // data: (listing_id, buyer, seller, nft_contract, token_id, price)
       await notifyWallet(data[1], 'sale', 'You collected an NFT', `Token #${data[4]} is now in your wallet.`)
     } else if (eventType === 'cancel' && data.length >= 1) {
-      await query('UPDATE marketplace_listings SET active=FALSE, ledger=? WHERE listing_id=?', [ledger, data[0]])
+      await query('UPDATE marketplace_listings SET active=FALSE, ledger=? WHERE contract_id=? AND listing_id=?', [ledger, contractId, data[0]])
     } else if (eventType === 'exp_l' && data.length >= 1) {
       // Permissionless expiry reclaim closed an expired listing.
-      await query('UPDATE marketplace_listings SET active=FALSE, ledger=? WHERE listing_id=?', [ledger, data[0]])
+      await query('UPDATE marketplace_listings SET active=FALSE, ledger=? WHERE contract_id=? AND listing_id=?', [ledger, contractId, data[0]])
     } else if (eventType === 'offer' && data.length >= 7) {
       await query(
-        'INSERT INTO marketplace_offers (offer_id, buyer, nft_contract, token_id, payment_token, amount, expires_at, active, ledger, contract_id) VALUES (?, ?, ?, ?, ?, ?, ?, TRUE, ?, ?) ON CONFLICT (offer_id) DO UPDATE SET active=TRUE, amount=EXCLUDED.amount, expires_at=EXCLUDED.expires_at, ledger=EXCLUDED.ledger, contract_id=EXCLUDED.contract_id',
+        'INSERT INTO marketplace_offers (offer_id, buyer, nft_contract, token_id, payment_token, amount, expires_at, active, ledger, contract_id) VALUES (?, ?, ?, ?, ?, ?, ?, TRUE, ?, ?) ON CONFLICT (contract_id, offer_id) DO UPDATE SET active=TRUE, amount=EXCLUDED.amount, expires_at=EXCLUDED.expires_at, ledger=EXCLUDED.ledger',
         [data[0], data[1], data[2], data[3], data[4], data[5], data[6], ledger, contractId],
       )
       // data: (offer_id, buyer, nft_contract, token_id, payment_token, amount, expires_at)
@@ -195,11 +205,27 @@ async function applyEvent(event: any) {
         await notifyWallet(owner, 'offer', 'You received an offer', body)
         await emailWallet(owner, `New offer for ${title}`, body, nftUrl)
       }
+    } else if (eventType === 'c_off' && data.length >= 7) {
+      await query('INSERT INTO marketplace_collection_offers (offer_id, contract_id, buyer, nft_contract, collection_scope, payment_token, amount, expires_at, active, ledger) VALUES (?, ?, ?, ?, ?, ?, ?, ?, TRUE, ?) ON CONFLICT (contract_id, offer_id) DO UPDATE SET buyer=EXCLUDED.buyer, nft_contract=EXCLUDED.nft_contract, collection_scope=EXCLUDED.collection_scope, payment_token=EXCLUDED.payment_token, amount=EXCLUDED.amount, expires_at=EXCLUDED.expires_at, active=TRUE, ledger=EXCLUDED.ledger, updated_at=now()', [data[0], contractId, data[1], data[2], data[3], data[4], data[5], data[6], ledger])
+    } else if (eventType === 'c_sale' && data.length >= 6) {
+      await query('UPDATE marketplace_collection_offers SET active=FALSE, ledger=?, updated_at=now() WHERE contract_id=? AND offer_id=?', [ledger, contractId, data[0]])
+      await upsertOwnership(data[3], data[4], data[1], ledger)
+      await activateReferral(data[1], 'collect')
+    } else if ((eventType === 'c_c' || eventType === 'c_exp') && data.length >= 1) {
+      await query('UPDATE marketplace_collection_offers SET active=FALSE, ledger=?, updated_at=now() WHERE contract_id=? AND offer_id=?', [ledger, contractId, data[0]])
+    } else if (eventType === 't_off' && data.length >= 9) {
+      await query('INSERT INTO marketplace_trait_offers (offer_id, contract_id, buyer, nft_contract, collection_scope, trait_type, trait_value, payment_token, amount, expires_at, active, ledger) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, TRUE, ?) ON CONFLICT (contract_id, offer_id) DO UPDATE SET buyer=EXCLUDED.buyer, nft_contract=EXCLUDED.nft_contract, collection_scope=EXCLUDED.collection_scope, trait_type=EXCLUDED.trait_type, trait_value=EXCLUDED.trait_value, payment_token=EXCLUDED.payment_token, amount=EXCLUDED.amount, expires_at=EXCLUDED.expires_at, active=TRUE, ledger=EXCLUDED.ledger, updated_at=now()', [data[0], contractId, data[1], data[2], data[3], data[4], data[5], data[6], data[7], data[8], ledger])
+    } else if (eventType === 't_sale' && data.length >= 6) {
+      await query('UPDATE marketplace_trait_offers SET active=FALSE, ledger=?, updated_at=now() WHERE contract_id=? AND offer_id=?', [ledger, contractId, data[0]])
+      await upsertOwnership(data[3], data[4], data[1], ledger)
+      await activateReferral(data[1], 'collect')
+    } else if ((eventType === 't_c' || eventType === 't_exp') && data.length >= 1) {
+      await query('UPDATE marketplace_trait_offers SET active=FALSE, ledger=?, updated_at=now() WHERE contract_id=? AND offer_id=?', [ledger, contractId, data[0]])
     } else if ((eventType === 'offer_c' || eventType === 'offer_cancel') && data.length >= 1) {
-      await query('UPDATE marketplace_offers SET active=FALSE, ledger=? WHERE offer_id=?', [ledger, data[0]])
+      await query('UPDATE marketplace_offers SET active=FALSE, ledger=? WHERE contract_id=? AND offer_id=?', [ledger, contractId, data[0]])
     } else if (eventType === 'offer_r' && Array.isArray(data) && data.length >= 3) {
-      const offer = await query<{ nft_contract: string; token_id: number; buyer: string }[]>('SELECT nft_contract, token_id, buyer FROM marketplace_offers WHERE offer_id=? LIMIT 1', [data[0]])
-      await query('UPDATE marketplace_offers SET active=FALSE, ledger=? WHERE offer_id=?', [ledger, data[0]])
+      const offer = await query<{ nft_contract: string; token_id: number; buyer: string }[]>('SELECT nft_contract, token_id, buyer FROM marketplace_offers WHERE contract_id=? AND offer_id=? LIMIT 1', [contractId, data[0]])
+      await query('UPDATE marketplace_offers SET active=FALSE, ledger=? WHERE contract_id=? AND offer_id=?', [ledger, contractId, data[0]])
       if (offer[0]) {
         const title = await resolveNftTitle(offer[0].nft_contract, offer[0].token_id)
         const body = `The owner cancelled your offer for “${title}”. Your escrow was refunded on Stellar.\n\nToken #${offer[0].token_id} · Offer #${data[0]}`
@@ -210,9 +236,9 @@ async function applyEvent(event: any) {
     } else if (eventType === 'exp_o' && data.length >= 1) {
       // Permissionless expiry reclaim refunded an expired offer.
       const offer = await query<{ buyer: string; nft_contract: string; token_id: number }[]>(
-        'SELECT buyer, nft_contract, token_id FROM marketplace_offers WHERE offer_id=? LIMIT 1', [data[0]],
+        'SELECT buyer, nft_contract, token_id FROM marketplace_offers WHERE contract_id=? AND offer_id=? LIMIT 1', [contractId, data[0]],
       )
-      await query('UPDATE marketplace_offers SET active=FALSE, ledger=? WHERE offer_id=?', [ledger, data[0]])
+      await query('UPDATE marketplace_offers SET active=FALSE, ledger=? WHERE contract_id=? AND offer_id=?', [ledger, contractId, data[0]])
       if (offer[0]) {
         const title = await resolveNftTitle(offer[0].nft_contract, offer[0].token_id)
         const message = `Your offer for “${title}” expired and the escrow was refunded.\n\nToken #${offer[0].token_id} · Offer #${data[0]}`
@@ -222,7 +248,7 @@ async function applyEvent(event: any) {
         if (owner) await notifyWallet(owner, 'offer_expired', 'An offer expired', `Offer #${data[0]} on token #${offer[0].token_id} expired.`)
       }
     } else if ((eventType === 'offer_s' || eventType === 'offer_sale') && data.length >= 6) {
-      await query('UPDATE marketplace_offers SET active=FALSE, ledger=? WHERE offer_id=?', [ledger, data[0]])
+      await query('UPDATE marketplace_offers SET active=FALSE, ledger=? WHERE contract_id=? AND offer_id=?', [ledger, contractId, data[0]])
       await upsertOwnership(data[3], data[4], data[1], ledger)
       // data: (offer_id, buyer, seller, nft_contract, token_id, amount)
       const title = await resolveNftTitle(data[3], Number(data[4]))
@@ -230,12 +256,42 @@ async function applyEvent(event: any) {
       const body = `Your offer for “${title}” was accepted. You now own this NFT. The transfer is confirmed on Stellar.`
       await notifyWallet(data[1], 'offer_sale', 'Your offer was accepted', body)
       await emailWallet(data[1], `Offer accepted · ${title}`, `${body}\n\nToken #${data[4]}`, nftUrl)
-    } else if (eventType === 'auction' && data.length >= 8) {
-      await query('INSERT INTO marketplace_events (event_key, event_type, contract_id, tx_hash, ledger, payload) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (event_key) DO UPDATE SET ledger=EXCLUDED.ledger', [eventKeyFrom(`auction:${data[0]}:${txHash}`), 'auction_state', contractId, txHash, ledger, safeStringify({ auctionId: data[0], data })])
+    } else if (eventType === 'auction' && data.length >= 9) {
+      await query(
+        'INSERT INTO marketplace_auctions (auction_id, contract_id, seller, nft_contract, token_id, payment_token, reserve_price, min_increment, highest_bid, highest_bidder, starts_at, ends_at, active, ledger) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, ?, ?, TRUE, ?) ON CONFLICT (contract_id, auction_id) DO UPDATE SET seller=EXCLUDED.seller, nft_contract=EXCLUDED.nft_contract, token_id=EXCLUDED.token_id, payment_token=EXCLUDED.payment_token, reserve_price=EXCLUDED.reserve_price, min_increment=EXCLUDED.min_increment, starts_at=EXCLUDED.starts_at, ends_at=EXCLUDED.ends_at, active=TRUE, ledger=EXCLUDED.ledger, updated_at=now()',
+        [data[0], contractId, data[1], data[2], data[3], data[4], data[5], data[6], data[7], data[8], ledger],
+      )
+    } else if (eventType === 'bid' && data.length >= 3) {
+      // A new bid immediately refunds the previous bidder's escrow in the
+      // contract. Read the old projection before updating it so that person
+      // gets a useful notification instead of silently losing the lead.
+      const previous = await query<{ highest_bidder: string | null; nft_contract: string; token_id: number; highest_bid: string }[]>(
+        'SELECT highest_bidder, nft_contract, token_id, highest_bid FROM marketplace_auctions WHERE contract_id=? AND auction_id=? AND active=TRUE LIMIT 1',
+        [contractId, data[0]],
+      )
+      await query('UPDATE marketplace_auctions SET highest_bidder=?, highest_bid=?, ledger=?, updated_at=now() WHERE contract_id=? AND auction_id=? AND active=TRUE', [data[1], data[2], ledger, contractId, data[0]])
+      const auction = previous[0]
+      if (auction?.highest_bidder && auction.highest_bidder !== data[1]) {
+        const title = await resolveNftTitle(auction.nft_contract, Number(auction.token_id))
+        const body = `Your bid of ${formatOfferAmount(auction.highest_bid)} XLM for “${title}” was exceeded. The contract refunded your escrow automatically. You can place another bid if the auction is still live.`
+        await notifyWallet(auction.highest_bidder, 'auction_outbid', 'You were outbid', body)
+        await emailWallet(auction.highest_bidder, `You were outbid · ${title}`, body, nftDetailUrl(auction.nft_contract, auction.token_id))
+      }
+    } else if ((eventType === 'auc_c' || eventType === 'auc_e') && data.length >= 1) {
+      await query('UPDATE marketplace_auctions SET active=FALSE, ledger=?, updated_at=now() WHERE contract_id=? AND auction_id=?', [ledger, contractId, data[0]])
     } else if ((eventType === 'auc_s' || eventType === 'auction_sale') && data.length >= 6) {
+      await query('UPDATE marketplace_auctions SET active=FALSE, highest_bidder=?, highest_bid=?, ledger=?, updated_at=now() WHERE contract_id=? AND auction_id=?', [data[1], data[5], ledger, contractId, data[0]])
       await upsertOwnership(data[3], data[4], data[1], ledger)
       // data: (auction_id, winner, seller, nft_contract, token_id, highest_bid)
-      await notifyWallet(data[1], 'auction_sale', 'You won the auction', `Token #${data[4]} is now yours.`)
+      const title = await resolveNftTitle(data[3], Number(data[4]))
+      const amount = `${formatOfferAmount(data[5])} XLM`
+      const nftUrl = nftDetailUrl(data[3], data[4])
+      const winnerBody = `You won “${title}” for ${amount}. The NFT transfer is confirmed on Stellar.`
+      await notifyWallet(data[1], 'auction_sale', 'You won the auction', winnerBody)
+      await emailWallet(data[1], `Auction won · ${title}`, winnerBody, nftUrl)
+      const sellerBody = `Your auction for “${title}” ended with a sale of ${amount}. Proceeds were transferred to your wallet on Stellar.`
+      await notifyWallet(data[2], 'auction_sale', 'Your auction sold', sellerBody)
+      await emailWallet(data[2], `Auction sold · ${title}`, sellerBody, nftUrl)
     }
   }
 
@@ -250,12 +306,19 @@ async function applyEvent(event: any) {
     const hasEditionStart = Array.isArray(data[1])
     const editionStart = hasEditionStart ? Number(data[0]) : 0
     const rawTokenIds = hasEditionStart ? data[1] : data
+    // New contract versions append exact paid stroops to the mint event.
+    // Older events have no third value; leave those null instead of guessing
+    // from a stage price that may have changed since the mint.
+    const paidStroops = hasEditionStart && data.length >= 3 && /^\d+$/.test(String(data[2]))
+      ? String(data[2])
+      : null
     const tokenIds = rawTokenIds.map((tokenId: unknown) => Number(tokenId)).filter((tokenId: number) => Number.isSafeInteger(tokenId) && tokenId >= 0)
     if (Number.isSafeInteger(stageId) && stageId >= 0 && /^G[A-Z2-7]{55}$/.test(wallet) && tokenIds.length) {
       await query(
-        'INSERT INTO stage_mint_events (contract_id, tx_hash, stage_id, wallet, token_ids, ledger, edition_start) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT (contract_id, tx_hash, stage_id) DO NOTHING',
-        [contractId, txHash, stageId, wallet, tokenIds, ledger, Number.isSafeInteger(editionStart) && editionStart >= 0 ? editionStart : 0],
+        'INSERT INTO stage_mint_events (contract_id, tx_hash, stage_id, wallet, token_ids, ledger, edition_start, paid_stroops) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (contract_id, tx_hash, stage_id) DO NOTHING',
+        [contractId, txHash, stageId, wallet, tokenIds, ledger, Number.isSafeInteger(editionStart) && editionStart >= 0 ? editionStart : 0, paidStroops],
       )
+      await activateReferral(wallet, 'mint')
     }
   }
   if (nftContractIds.has(contractId) && (eventType === 'transfer' || eventType === 'mint')) {
@@ -265,6 +328,7 @@ async function applyEvent(event: any) {
       await upsertOwnership(contractId, tokenId, to, ledger)
       if (eventType === 'mint') {
         await query('INSERT INTO verified_nft_mints (contract_id, token_id, minter, tx_hash, ledger) VALUES (?, ?, ?, ?, ?) ON CONFLICT (contract_id, token_id) DO NOTHING', [contractId, tokenId, to, txHash, ledger])
+        await activateReferral(to, 'mint')
         await fanoutDropNotification(contractId, tokenId)
         await notifyWallet(to, 'drop', 'New drop', `You received token #${tokenId}.`)
       }
@@ -291,10 +355,7 @@ async function upsertOwnership(contractId: unknown, tokenId: unknown, ownerAddre
  */
 async function notifyWallet(wallet: unknown, kind: string, title: string, body: string) {
   if (typeof wallet !== 'string' || !/^G[A-Z2-7]{55}$/.test(wallet)) return
-  await query(
-    'INSERT INTO notifications (wallet_address, kind, title, body) VALUES (?, ?, ?, ?)',
-    [wallet, kind, title, body],
-  )
+  await notifyUser(wallet, kind, title, body)
 }
 
 async function resolveNftTitle(contractId: unknown, tokenId: number): Promise<string> {
@@ -347,17 +408,32 @@ async function resolveTokenOwner(nftContract: unknown, tokenId: unknown): Promis
 // event level (each mint writes one marketplace_events row).
 async function fanoutDropNotification(contractId: string, tokenId: unknown) {
   const registry = await query<{ collection_id: string }[]>(
-    'SELECT collection_id FROM token_collections WHERE contract_id = ? AND token_id = ? LIMIT 1',
-    [contractId, tokenId],
+    `SELECT collection_id FROM token_collections WHERE LOWER(contract_id) = LOWER(?) AND token_id = ?
+     UNION SELECT collection_id FROM nft_mints WHERE LOWER(contract_id) = LOWER(?) AND token_id = ? AND collection_id IS NOT NULL
+     LIMIT 1`,
+    [contractId, tokenId, contractId, tokenId],
   )
   if (!registry.length) return
   const collectionId = registry[0].collection_id
+  const collection = await query<{ owner_wallet: string; name: string }[]>(
+    'SELECT owner_wallet, name FROM collections WHERE slug = ? LIMIT 1', [collectionId],
+  )
+  if (collection.length) {
+    await notifyUser(
+      collection[0].owner_wallet,
+      'collection_mint',
+      'Your collection received a mint',
+      `${collection[0].name} just received a new mint (token #${tokenId}).`,
+      `/collection/${encodeURIComponent(collectionId)}`,
+    )
+  }
   const subscribers = await query<{ wallet_address: string }[]>(
     'SELECT wallet_address FROM collection_subscriptions WHERE collection_id = ?',
     [collectionId],
   )
   for (const subscriber of subscribers) {
-    await notifyWallet(subscriber.wallet_address, 'drop', `New drop in ${collectionId}`, `Token #${tokenId} just dropped in ${collectionId}.`)
+    if (subscriber.wallet_address.toLowerCase() === collection[0]?.owner_wallet.toLowerCase()) continue
+    await notifyUser(subscriber.wallet_address, 'drop', `New mint in ${collection[0]?.name ?? collectionId}`, `Token #${tokenId} just minted in ${collection[0]?.name ?? collectionId}.`, `/collection/${encodeURIComponent(collectionId)}`)
   }
 }
 
@@ -375,6 +451,7 @@ export async function runIndexerOnce() {
     nftContractIds = new Set([...(nftId ? [nftId] : []), ...registeredContracts.map((row) => row.contract_id)])
     const latest = await rpc('getLatestLedger')
     const latestLedger = Number(latest.sequence)
+    const sorobanServer = new StellarSdk.rpc.Server(rpcUrl)
     // A configured start ledger is only the bootstrap position. Once the
     // indexer has persisted progress, always resume from that checkpoint;
     // otherwise every server restart replays from the original env value and
@@ -414,6 +491,34 @@ export async function runIndexerOnce() {
       } while (pagingToken)
       cursor = endLedger + 1
       await query('INSERT INTO indexer_state (name, next_ledger, updated_at) VALUES (?, ?, now()) ON CONFLICT (name) DO UPDATE SET next_ledger=GREATEST(indexer_state.next_ledger, EXCLUDED.next_ledger), updated_at=now()', ['stellar-events', cursor])
+    }
+    // Older deployed marketplace contracts don't emit an event when an
+    // ended auction with no bids is settled. Reconcile those rows by reading
+    // the contract's existing auction state; this is read-only and needs no
+    // contract upgrade or replacement contract ID.
+    const endedAuctions = await query<{ auction_id: number; seller: string }[]>(
+      'SELECT auction_id, seller FROM marketplace_auctions WHERE contract_id=? AND active=TRUE AND ends_at<=? ORDER BY ends_at ASC LIMIT 50',
+      [marketplaceId, latestLedger],
+    )
+    for (const auction of endedAuctions) {
+      try {
+        const source = await sorobanServer.getAccount(auction.seller)
+        const transaction = new StellarSdk.TransactionBuilder(source, {
+          fee: StellarSdk.BASE_FEE,
+          networkPassphrase: StellarSdk.Networks.TESTNET,
+        }).addOperation(new StellarSdk.Contract(marketplaceId).call(
+          'get_auction',
+          StellarSdk.nativeToScVal(Number(auction.auction_id), { type: 'u32' }),
+        ) as never).setTimeout(60).build()
+        const simulation = await sorobanServer.simulateTransaction(transaction)
+        if (StellarSdk.rpc.Api.isSimulationError(simulation)) continue
+        const state = simulation.result?.retval ? StellarSdk.scValToNative(simulation.result.retval) as { active?: unknown } : null
+        if (state?.active === false) {
+          await query('UPDATE marketplace_auctions SET active=FALSE, ledger=?, updated_at=now() WHERE contract_id=? AND auction_id=? AND active=TRUE', [latestLedger, marketplaceId, auction.auction_id])
+        }
+      } catch {
+        // A transient RPC error should not stop event indexing for the ledger.
+      }
     }
     // Project any confirmed mint events that do not yet have a feed row. This
     // also repairs old events already marked indexed and makes feed visibility
@@ -505,6 +610,59 @@ export async function reconcileMarketplaceStateForWallet(wallet: string) {
       lastRun.error = error instanceof Error ? `Offer reconciliation: ${error.message}` : 'Offer reconciliation failed'
     }
   }
+}
+
+/** Submit bounded permissionless marketplace cleanup calls with a dedicated
+ * funded keeper key. Never use the marketplace admin/deployer key here. */
+export async function runMarketplaceKeeper() {
+  const keeperSecret = process.env.STELLAR_MARKETPLACE_KEEPER_SECRET
+  if (!keeperSecret) throw new Error('Marketplace keeper signer is not configured')
+  if ((process.env.VITE_STELLAR_NETWORK ?? 'TESTNET').toUpperCase() !== 'TESTNET') throw new Error('Marketplace keeper is restricted to Stellar Testnet')
+  await ensureSchema()
+  const server = new StellarSdk.rpc.Server(rpcUrl)
+  const keeper = StellarSdk.Keypair.fromSecret(keeperSecret)
+  const latest = await rpc('getLatestLedger')
+  const ledger = Number(latest.sequence)
+  const now = Math.floor(Date.now() / 1000)
+  const [listings, offers, collectionOffers, traitOffers, auctions] = await Promise.all([
+    query<{ listing_id: number }[]>('SELECT listing_id FROM marketplace_listings WHERE contract_id=? AND active=TRUE AND expires_at<=? ORDER BY expires_at ASC LIMIT 10', [marketplaceId, ledger]),
+    query<{ offer_id: number }[]>('SELECT offer_id FROM marketplace_offers WHERE contract_id=? AND active=TRUE AND expires_at<=? ORDER BY expires_at ASC LIMIT 10', [marketplaceId, now]),
+    query<{ offer_id: number }[]>('SELECT offer_id FROM marketplace_collection_offers WHERE contract_id=? AND active=TRUE AND expires_at<=? ORDER BY expires_at ASC LIMIT 10', [marketplaceId, now]),
+    query<{ offer_id: number }[]>('SELECT offer_id FROM marketplace_trait_offers WHERE contract_id=? AND active=TRUE AND expires_at<=? ORDER BY expires_at ASC LIMIT 10', [marketplaceId, now]),
+    query<{ auction_id: number }[]>('SELECT auction_id FROM marketplace_auctions WHERE contract_id=? AND active=TRUE AND ends_at<=? ORDER BY ends_at ASC LIMIT 10', [marketplaceId, ledger]),
+  ])
+  let submitted = 0
+  let failed = 0
+  const run = async (method: string, id: number) => {
+    try {
+      const account = await server.getAccount(keeper.publicKey())
+      const tx = new StellarSdk.TransactionBuilder(account, {
+        fee: StellarSdk.BASE_FEE,
+        networkPassphrase: StellarSdk.Networks.TESTNET,
+      }).addOperation(new StellarSdk.Contract(marketplaceId).call(method, StellarSdk.nativeToScVal(id, { type: 'u32' })) as never).setTimeout(60).build()
+      const prepared = await server.prepareTransaction(tx)
+      prepared.sign(keeper)
+      const sent = await server.sendTransaction(prepared)
+      if (sent.status === 'ERROR') throw new Error(`RPC rejected ${method}`)
+      for (let attempt = 0; attempt < 20; attempt += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 1000))
+        const result = await server.getTransaction(sent.hash)
+        if (result.status === 'SUCCESS') { submitted += 1; return }
+        if (result.status === 'FAILED') throw new Error(`${method} transaction failed`)
+      }
+      throw new Error(`${method} confirmation timed out`)
+    } catch (error) {
+      failed += 1
+      lastRun.error = error instanceof Error ? `Marketplace keeper: ${error.message}` : 'Marketplace keeper transaction failed'
+    }
+  }
+  for (const item of listings) await run('expire_listing', Number(item.listing_id))
+  for (const item of offers) await run('expire_offer', Number(item.offer_id))
+  for (const item of collectionOffers) await run('expire_collection_offer', Number(item.offer_id))
+  for (const item of traitOffers) await run('expire_trait_offer', Number(item.offer_id))
+  for (const item of auctions) await run('settle_auction', Number(item.auction_id))
+  if (submitted) await runIndexerOnce()
+  return { latestLedger: ledger, checked: listings.length + offers.length + collectionOffers.length + traitOffers.length + auctions.length, submitted, failed }
 }
 
 /** Compare a bounded ownership projection sample with Soroban owner_of state and

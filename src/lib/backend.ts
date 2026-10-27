@@ -1,4 +1,6 @@
 import { signWalletChallenge, type StellarWallet } from './stellar'
+import { clearPendingReferralCode, pendingReferralCode } from './referrals'
+import { trackProductEvent } from './product-analytics'
 
 export type SocialState = {
   subscriptions: string[]
@@ -38,6 +40,7 @@ export type NotificationRecord = {
   kind: string
   title: string
   body: string
+  action_url?: string
   read_at?: string | null
   created_at: string
 }
@@ -45,6 +48,7 @@ export type NotificationRecord = {
 export type PostRecord = {
   id: number
   author: string
+  creator_wallet?: string | null
   author_name: string
   is_me?: boolean
   avatar: string
@@ -63,10 +67,13 @@ export type PostRecord = {
   comments: SocialComment[]
   liked: boolean
   reposted: boolean
+  tip_recipient?: string | null
+  tips_count?: number
+  tips_total_xlm?: string
 }
 
-export type CollectionStory = { id: number; mediaUrl: string; mediaType: 'image' | 'video'; caption: string; createdAt: string; expiresAt: string }
-export type CollectionStoryGroup = { collectionId: string; name: string; cover: string; isMine: boolean; stories: CollectionStory[] }
+export type CollectionStory = { id: number; mediaUrl: string; mediaType: 'image' | 'video'; caption: string; createdAt: string; expiresAt: string; viewed?: boolean }
+export type CollectionStoryGroup = { kind: 'creator' | 'collection'; collectionId: string; creatorWallet?: string; name: string; cover: string; isMine: boolean; stories: CollectionStory[] }
 
 export type OwnedNft = {
   contract_id: string
@@ -101,13 +108,17 @@ restoreWalletSessions()
 export async function authenticatePrivyWallet(accessToken: string): Promise<{ address: string }> {
   const response = await fetch('/api/auth/privy/session', {
     method: 'POST',
-    headers: { authorization: `Bearer ${accessToken}` },
+    headers: { authorization: `Bearer ${accessToken}`, 'content-type': 'application/json' },
+    body: JSON.stringify({ referralCode: pendingReferralCode() }),
   })
   const result = await response.json()
   if (!response.ok) throw new Error(result.error ?? 'Email wallet sign-in failed')
   if (typeof result.wallet !== 'string' || typeof result.token !== 'string') throw new Error('The server did not return a verified wallet session')
   walletSessions.set(result.wallet, result.token)
   persistWalletSessions()
+  clearPendingReferralCode()
+  if (result.referralApplied === true) trackProductEvent('referral_attributed')
+  if (result.newAccount === true) trackProductEvent('account_created', { flow: 'privy' })
   return { address: result.wallet }
 }
 
@@ -116,11 +127,14 @@ export async function authenticateWallet(wallet: StellarWallet) {
   const challenge = await challengeResponse.json()
   if (!challengeResponse.ok) throw new Error(challenge.error ?? 'Could not start wallet sign-in')
   const signature = await signWalletChallenge(challenge.message, wallet.address, wallet.networkPassphrase)
-  const verifyResponse = await fetch('/api/auth/verify', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ wallet: wallet.address, challengeId: challenge.challengeId, signature }) })
+  const verifyResponse = await fetch('/api/auth/verify', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ wallet: wallet.address, challengeId: challenge.challengeId, signature, referralCode: pendingReferralCode() }) })
   const result = await verifyResponse.json()
   if (!verifyResponse.ok) throw new Error(result.error ?? 'Wallet sign-in failed')
   walletSessions.set(wallet.address, result.token)
   persistWalletSessions()
+  clearPendingReferralCode()
+  if (result.referralApplied === true) trackProductEvent('referral_attributed')
+  if (result.newAccount === true) trackProductEvent('account_created', { flow: 'wallet' })
 }
 
 export function authHeaders(address: string): Record<string, string> {
@@ -208,8 +222,37 @@ export async function markNotificationRead(address: string, id: number) {
   return request<{ read: boolean }>(`/api/notifications/${id}/read`, address, { method: 'POST' })
 }
 
+export async function markAllNotificationsRead(address: string) {
+  return request<{ read: boolean; updated: number }>('/api/notifications/read-all', address, { method: 'POST' })
+}
+
 export async function fetchNotifications(address: string) {
   return request<{ notifications: NotificationRecord[]; unreadCount: number }>('/api/notifications', address)
+}
+
+export async function fetchBrowserPushConfig() {
+  const response = await fetch('/api/push/config')
+  if (!response.ok) throw new Error('Browser alerts are unavailable right now')
+  return response.json() as Promise<{ enabled: boolean; publicKey: string | null }>
+}
+
+export async function saveBrowserPushSubscription(address: string, subscription: PushSubscriptionJSON) {
+  return request<{ subscribed: boolean }>('/api/push/subscription', address, {
+    method: 'POST',
+    body: JSON.stringify({ subscription }),
+  })
+}
+
+export async function removeBrowserPushSubscription(address: string, endpoint: string) {
+  return request<{ unsubscribed: boolean; removed: boolean }>('/api/push/subscription', address, {
+    method: 'DELETE',
+    body: JSON.stringify({ endpoint }),
+  })
+}
+
+export type ReferralSummary = { code: string; referrals: number; activated: number }
+export async function fetchReferralSummary(address: string) {
+  return request<ReferralSummary>('/api/referrals/me', address)
 }
 
 // Register a token → collection mapping so indexed mints fan out “new drop”
@@ -236,12 +279,21 @@ export async function createCollectionStory(address: string, collectionId: strin
   return request<{ story: CollectionStory }>(`/api/collections/${encodeURIComponent(collectionId)}/stories`, address, { method: 'POST', body: JSON.stringify(input) })
 }
 
-export async function fetchPosts(address?: string, collectionId?: string, postId?: number) {
+export async function createCreatorStory(address: string, input: { caption?: string; mediaUrl?: string; mediaType?: 'image' | 'video' }) {
+  return request<{ story: CollectionStory }>('/api/creator-stories', address, { method: 'POST', body: JSON.stringify(input) })
+}
+
+export async function markStoryViewed(address: string, kind: 'creator' | 'collection', id: number) {
+  return request<{ viewed: boolean }>(`/api/stories/${kind}/${id}/viewed`, address, { method: 'POST', body: '{}' })
+}
+
+export async function fetchPosts(address?: string, collectionId?: string, postId?: number, creatorWallet?: string) {
   const headers: Record<string, string> = {}
   if (address) Object.assign(headers, authHeaders(address))
   const params = new URLSearchParams()
   if (collectionId) params.set('collectionId', collectionId)
   if (postId) params.set('postId', String(postId))
+  if (creatorWallet) params.set('creatorWallet', creatorWallet)
   const query = params.size ? `?${params.toString()}` : ''
   const response = await fetch(`/api/posts${query}`, { headers })
   if (!response.ok) throw new Error('Unable to load posts')
@@ -251,6 +303,10 @@ export async function fetchPosts(address?: string, collectionId?: string, postId
 
 export async function createPost(address: string, input: { caption?: string; mediaUrl?: string; mediaType?: 'image' | 'video'; linkedNftId?: string | null; kind?: 'post' | 'drop'; price?: number | null; collectionId?: string | null }) {
   return request<{ id: number }>('/api/posts', address, { method: 'POST', body: JSON.stringify({ ...input, mediaType: input.mediaType ?? 'image', kind: input.kind ?? 'post' }) })
+}
+
+export async function recordPostTip(address: string, postId: number, transactionHash: string) {
+  return request<{ postId: number; transactionHash: string; amountXlm: string; duplicate: boolean; tipsCount: number; tipsTotalXlm: string }>(`/api/posts/${postId}/tips`, address, { method: 'POST', body: JSON.stringify({ transactionHash }) })
 }
 
 export async function togglePostLike(address: string, postId: number) {
@@ -326,8 +382,8 @@ export type PublicCollection = {
 export type AnalyticsSnapshot = {
   generatedAt: string
   network: string
-  summary: { collections: number; minted: number; holders: number; listings: number; sales: number; volume_xlm: string }
-  daily: { day: string; mints: number; volume_xlm: string }[]
+  summary: { collections: number; minted: number; holders: number; listings: number; sales: number; primary_volume_xlm: string; secondary_volume_xlm: string; volume_xlm: string }
+  daily: { day: string; mints: number; primary_volume_xlm: string; secondary_volume_xlm: string; volume_xlm: string }[]
   topCollections: { collection_id: string; name: string; cover: string; minted: number }[]
 }
 
@@ -381,6 +437,13 @@ export type PublicCreatorProfile = {
   collector_count: number
 }
 
+export async function fetchPublicCreatorProfile(identifier: string): Promise<PublicCreatorProfile> {
+  const response = await fetch(`/api/creators/profile/${encodeURIComponent(identifier)}`, { cache: 'no-store' })
+  const data = await response.json() as { profile?: PublicCreatorProfile; error?: string }
+  if (!response.ok || !data.profile) throw new Error(data.error ?? 'Creator profile not found')
+  return data.profile
+}
+
 export async function fetchCreatorProfiles(wallets: string[]): Promise<PublicCreatorProfile[]> {
   const addresses = [...new Set(wallets.filter((wallet) => /^G[A-Z2-7]{55}$/.test(wallet)))].slice(0, 100)
   if (!addresses.length) return []
@@ -403,6 +466,100 @@ export type CollectionMintHistoryEntry = {
   last_ledger: number
   stages: { stage_name: string; stage_minted: number }[]
 }
+
+export type PublicFeedbackEntry = {
+  id: number
+  category: 'idea' | 'problem' | 'praise'
+  title: string
+  body: string
+  status: 'new' | 'planned' | 'in_progress' | 'done'
+  created_at: string
+}
+
+export async function fetchPublicFeedback(): Promise<PublicFeedbackEntry[]> {
+  const response = await fetch('/api/feedback')
+  const data = await response.json().catch(() => ({})) as { entries?: PublicFeedbackEntry[]; error?: string }
+  if (!response.ok) throw new Error(data.error || 'Feedback is temporarily unavailable')
+  return data.entries ?? []
+}
+
+export async function submitPublicFeedback(input: { category: PublicFeedbackEntry['category']; title: string; body: string }): Promise<PublicFeedbackEntry> {
+  const response = await fetch('/api/feedback', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(input) })
+  const data = await response.json().catch(() => ({})) as { entry?: PublicFeedbackEntry; error?: string }
+  if (!response.ok || !data.entry) throw new Error(data.error || 'Feedback could not be submitted')
+  return data.entry
+}
+
+export type CreatorServiceListing = {
+  id: number; creator_wallet: string; creator_name: string; title: string; category: 'commission' | 'creative_service';
+  description: string; image_url: string | null; pricing_type: 'quote' | 'starting_at' | 'fixed'; price_xlm: string | null;
+  availability: string; delivery_details: string | null; status: 'published' | 'paused' | 'sold'; created_at: string
+}
+export type CreatorServiceRequest = {
+  id: number; listing_id: number; buyer_wallet: string; creator_wallet: string; brief: string; delivery_address: string | null;
+  status: 'requested' | 'accepted' | 'declined' | 'paid' | 'in_progress' | 'shipped' | 'delivered' | 'completed';
+  agreed_amount_xlm: string | null; transaction_hash: string | null; creator_note: string | null; created_at: string;
+  title: string; category: 'commission' | 'creative_service'; pricing_type: CreatorServiceListing['pricing_type']; listing_price_xlm: string | null
+}
+export type CreatorExhibition = {
+  id: number; organizer_wallet: string; organizer_name: string; title: string; description: string; venue: string; street_address: string;
+  city: string; region: string; country: string; starts_at: string; ends_at: string; website_url: string | null; ticket_url: string | null;
+  image_url: string | null; status: 'published' | 'cancelled'; created_at: string
+}
+
+export async function fetchCreatorServices(category?: string) {
+  const query = category ? `?category=${encodeURIComponent(category)}` : ''
+  const response = await fetch(`/api/creator-services${query}`)
+  const data = await response.json().catch(() => ({})) as { items?: CreatorServiceListing[]; error?: string }
+  if (!response.ok) throw new Error(data.error || 'Creator services are temporarily unavailable')
+  return data.items ?? []
+}
+export async function fetchMyCreatorServices(address:string) { return (await request<{items:CreatorServiceListing[]}>('/api/creator-services/mine',address)).items }
+export async function createCreatorService(address: string, input: { title: string; category: 'commission' | 'creative_service'; description: string; imageUrl?: string; pricingType: 'quote' | 'starting_at' | 'fixed'; priceXlm?: string; availability: string; deliveryDetails: string }) {
+  return request<{ id: number }>('/api/creator-services', address, { method: 'POST', body: JSON.stringify(input) })
+}
+export async function updateCreatorService(address: string, id: number, status: 'published' | 'paused') {
+  return request<{ ok: boolean }>(`/api/creator-services/${id}`, address, { method: 'PATCH', body: JSON.stringify({ status }) })
+}
+export async function fetchCreatorServiceRequests(address: string) {
+  return (await request<{ items: CreatorServiceRequest[] }>('/api/creator-service-requests', address)).items
+}
+export async function createCreatorServiceRequest(address: string, listingId: number, brief: string, deliveryAddress?: string) {
+  return request<{ id: number }>('/api/creator-service-requests', address, { method: 'POST', body: JSON.stringify({ listingId, brief, deliveryAddress }) })
+}
+export async function respondCreatorServiceRequest(address: string, id: number, input: { action: string; amountXlm?: string; note?: string }) {
+  return request<{ ok: boolean }>(`/api/creator-service-requests/${id}`, address, { method: 'PATCH', body: JSON.stringify(input) })
+}
+export async function recordCreatorServicePayment(address: string, id: number, transactionHash: string) {
+  return request<{ ok: boolean; transactionHash: string }>(`/api/creator-service-requests/${id}/payment`, address, { method: 'POST', body: JSON.stringify({ transactionHash }) })
+}
+export async function fetchExhibitions(scope: 'upcoming' | 'past' = 'upcoming') {
+  const response = await fetch(`/api/exhibitions?scope=${scope}`)
+  const data = await response.json().catch(() => ({})) as { items?: CreatorExhibition[]; error?: string }
+  if (!response.ok) throw new Error(data.error || 'Exhibitions are temporarily unavailable')
+  return data.items ?? []
+}
+export async function createExhibition(address: string, input: Record<string, unknown>) {
+  return request<{ id: number }>('/api/exhibitions', address, { method: 'POST', body: JSON.stringify(input) })
+}
+export async function updateExhibition(address: string, id: number, status: 'published' | 'cancelled') {
+  return request<{ ok: boolean }>(`/api/exhibitions/${id}`, address, { method: 'PATCH', body: JSON.stringify({ status }) })
+}
+export type PhysicalArtListing = { id:number; creator_wallet:string; creator_name:string; title:string; description:string; image_url:string; price_xlm:string; dimensions:string; medium:string; delivery_details:string; status:'published'|'paused'|'sold'; created_at:string }
+export type PhysicalArtOrder = { id:number; listing_id:number; buyer_wallet:string; seller_wallet:string; delivery_address:string; status:'pending'|'paid'|'shipped'|'delivered'|'completed'|'cancelled'; transaction_hash:string|null; tracking_note:string|null; created_at:string; title:string; price_xlm:string; image_url:string }
+export async function fetchPhysicalArt() {
+  const response = await fetch('/api/physical-art')
+  const data = await response.json().catch(() => ({})) as { items?: PhysicalArtListing[]; error?: string }
+  if (!response.ok) throw new Error(data.error || 'Physical art is temporarily unavailable')
+  return data.items ?? []
+}
+export async function fetchMyPhysicalArt(address:string) { return (await request<{items:PhysicalArtListing[]}>('/api/physical-art/mine',address)).items }
+export async function createPhysicalArt(address:string,input:Record<string,unknown>) { return request<{id:number}>('/api/physical-art',address,{method:'POST',body:JSON.stringify(input)}) }
+export async function updatePhysicalArt(address:string,id:number,status:'published'|'paused') { return request<{ok:boolean}>(`/api/physical-art/${id}`,address,{method:'PATCH',body:JSON.stringify({status})}) }
+export async function fetchPhysicalArtOrders(address:string) { return (await request<{items:PhysicalArtOrder[]}>('/api/physical-art/orders',address)).items }
+export async function createPhysicalArtOrder(address:string,id:number,deliveryAddress:string) { return request<{id:number}>(`/api/physical-art/${id}/orders`,address,{method:'POST',body:JSON.stringify({deliveryAddress})}) }
+export async function recordPhysicalArtPayment(address:string,id:number,transactionHash:string) { return request<{ok:boolean}>(`/api/physical-art/orders/${id}/payment`,address,{method:'POST',body:JSON.stringify({transactionHash})}) }
+export async function updatePhysicalArtOrder(address:string,id:number,action:string,note?:string) { return request<{ok:boolean}>(`/api/physical-art/orders/${id}`,address,{method:'PATCH',body:JSON.stringify({action,note})}) }
 
 export type NftChainActivityEntry = {
   kind: 'mint' | 'transfer' | 'sale'
@@ -479,8 +636,8 @@ export async function registerNftContract(address: string, contractId: string) {
   return request<{ registered: boolean; contractId: string; network: string }>('/api/nft/contracts/register', address, { method: 'POST', body: JSON.stringify({ contractId }) })
 }
 
-export async function createCollection(address: string, input: { name: string; symbol: string; description?: string; cover?: string; totalSupply: number; contractId: string }) {
-  return request<{ id: number; slug: string; contractId: string; totalSupply: number; isCreator: boolean }>('/api/account/collections', address, { method: 'POST', body: JSON.stringify(input) })
+export async function createCollection(address: string, input: { name: string; symbol: string; description?: string; cover?: string; totalSupply: number | null; contractId: string }) {
+  return request<{ id: number; slug: string; contractId: string; totalSupply: number | null; isCreator: boolean }>('/api/account/collections', address, { method: 'POST', body: JSON.stringify(input) })
 }
 
 export async function updateCollectionProfile(address: string, slug: string, input: { websiteUrl: string; socialLinks: Record<string, string>; cover?: string }) {
@@ -534,12 +691,58 @@ export type MintedNft = {
 
 export type MarketplaceListing = {
   listing_id: number
+  contract_id?: string
   seller: string
   nft_contract: string
   token_id: number
+  payment_token: string
   price: string
   expires_at: number
   ledger: number
+}
+
+export type MarketplaceAuction = {
+  auction_id: number
+  seller: string
+  nft_contract: string
+  token_id: number
+  payment_token: string
+  reserve_price: string
+  min_increment: string
+  highest_bid: string
+  highest_bidder: string | null
+  starts_at: number
+  ends_at: number
+  active: boolean
+  ledger: number
+}
+
+export type MarketplaceCollectionOffer = {
+  offer_id: number
+  contract_id: string
+  buyer: string
+  nft_contract: string
+  collection_scope: string
+  payment_token: string
+  amount: string
+  expires_at: number
+  ledger: number
+}
+
+export type MarketplaceTraitOffer = MarketplaceCollectionOffer & { trait_type: string; trait_value: string }
+
+export async function fetchActiveMarketplaceCollectionOffers(): Promise<MarketplaceCollectionOffer[]> {
+  const response = await fetch('/api/marketplace/status')
+  if (!response.ok) throw new Error(`Marketplace collection offers query failed (${response.status})`)
+  const data = await response.json() as { collectionOffers?: MarketplaceCollectionOffer[] }
+  return data.collectionOffers ?? []
+}
+
+export async function fetchActiveMarketplaceTraitOffers(): Promise<MarketplaceTraitOffer[]> {
+  const response = await fetch('/api/marketplace/status')
+  if (!response.ok) throw new Error(`Marketplace trait offers query failed (${response.status})`)
+  const data = await response.json() as { traitOffers?: MarketplaceTraitOffer[] }
+  return data.traitOffers ?? []
 }
 
 export async function fetchActiveMarketplaceListings(): Promise<MarketplaceListing[]> {
@@ -549,6 +752,13 @@ export async function fetchActiveMarketplaceListings(): Promise<MarketplaceListi
   return data.listings ?? []
 }
 
+export async function fetchActiveMarketplaceAuctions(): Promise<MarketplaceAuction[]> {
+  const response = await fetch('/api/marketplace/status')
+  if (!response.ok) throw new Error(`Marketplace auctions query failed (${response.status})`)
+  const data = await response.json() as { auctions?: MarketplaceAuction[] }
+  return data.auctions ?? []
+}
+
 export type MarketplaceOffer = {
   offer_id: number
   contract_id?: string
@@ -556,6 +766,7 @@ export type MarketplaceOffer = {
   token_id: number
   buyer?: string
   amount: string
+  payment_token?: string
   expires_at: number
   ledger: number
   response_status?: 'countered' | 'counter_accepted' | 'counter_rejected' | null
@@ -583,9 +794,9 @@ export async function fetchMarketplaceState(address: string): Promise<Marketplac
   return response.json() as Promise<MarketplaceState>
 }
 
-export async function respondToMarketplaceOffer(address: string, offerId: number, action: 'counter' | 'counter-accept' | 'counter-reject', amount?: string) {
+export async function respondToMarketplaceOffer(address: string, offerId: number, action: 'counter' | 'counter-accept' | 'counter-reject', amount?: string, contractId?: string) {
   const route = action === 'counter' ? 'counter' : 'counter-response'
-  const body = action === 'counter' ? { amount } : { action: action === 'counter-accept' ? 'accept' : 'reject' }
+  const body = action === 'counter' ? { amount, contractId } : { action: action === 'counter-accept' ? 'accept' : 'reject', contractId }
   return request<{ status: string; counterAmount?: string | null }>(`/api/marketplace/offers/${offerId}/${route}`, address, { method: 'POST', body: JSON.stringify(body) })
 }
 

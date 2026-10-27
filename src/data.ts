@@ -2,6 +2,7 @@ export type Creator = {
   id: string
   name: string
   handle: string
+  publicSlug?: string
   avatar: string
   bio: string
   collectorCount: string

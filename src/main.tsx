@@ -1,8 +1,15 @@
 import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 import App from './App'
+import './lib/product-analytics'
+import { pendingReferralCode } from './lib/referrals'
 import { StellarAuthProvider } from './lib/privy-auth'
+import { initializeTelegramMiniApp } from './lib/telegram-mini-app'
 import './styles.css'
+
+// Persist and remove an invite code before the SPA or analytics initializes.
+pendingReferralCode()
+initializeTelegramMiniApp()
 
 async function clearDevelopmentServiceWorkerState() {
   if (!('serviceWorker' in navigator) || import.meta.env.PROD) return

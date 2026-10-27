@@ -120,6 +120,19 @@ async function getSourceAccount(wallet: StellarWallet) {
   }
 }
 
+/** Simulate a read-only contract method without requesting a wallet signature. */
+export async function simulateSorobanRead(contractId: string, method: string, args: StellarSdk.xdr.ScVal[], wallet: StellarWallet) {
+  const account = await getSourceAccount(wallet)
+  const transaction = new StellarSdk.TransactionBuilder(account, {
+    fee: StellarSdk.BASE_FEE,
+    networkPassphrase: wallet.networkPassphrase || STELLAR_NETWORK_PASSPHRASE,
+  }).addOperation(new StellarSdk.Contract(contractId).call(method, ...args) as never).setTimeout(30).build()
+  const simulation = await server.simulateTransaction(transaction)
+  if (StellarSdk.rpc.Api.isSimulationError(simulation)) throw new Error(simulation.error)
+  if (!simulation.result) throw new Error(`Could not read ${method} from the contract`)
+  return StellarSdk.scValToNative(simulation.result.retval)
+}
+
 export async function invokeSoroban(contractId: string, method: string, args: StellarSdk.xdr.ScVal[], wallet: StellarWallet, onProgress?: (stage: 'awaiting-wallet' | 'confirming') => void) {
   const account = await getSourceAccount(wallet)
   const transaction = new StellarSdk.TransactionBuilder(account, {
@@ -145,6 +158,85 @@ export async function invokeSorobanBatch(contractId: string, calls: { method: st
   const simulation = await server.simulateTransaction(transaction)
   if (StellarSdk.rpc.Api.isSimulationError(simulation)) throw new Error(simulation.error)
   return submitPrepared(StellarSdk.rpc.assembleTransaction(transaction, simulation).build(), wallet)
+}
+
+export async function sendXlmTip(wallet: StellarWallet, recipient: string, postId: number, amount: string, onProgress?: (stage: 'awaiting-wallet' | 'confirming') => void) {
+  const cleanAmount = amount.trim()
+  const value = Number(cleanAmount)
+  if (!/^\d+(?:\.\d{1,7})?$/.test(cleanAmount) || !Number.isFinite(value) || value <= 0 || value > 10_000) throw new Error('Enter a tip between 0.0000001 and 10,000 XLM')
+  if (!/^G[A-Z2-7]{55}$/.test(recipient)) throw new Error('This creator does not have a valid Stellar wallet')
+  if (recipient.toLowerCase() === wallet.address.toLowerCase()) throw new Error('You cannot tip your own post')
+  if (!Number.isSafeInteger(postId) || postId <= 0) throw new Error('This post does not have a valid tip reference')
+  const horizonUrl = wallet.network === 'PUBLIC' ? 'https://horizon.stellar.org' : 'https://horizon-testnet.stellar.org'
+  const horizon = new StellarSdk.Horizon.Server(horizonUrl)
+  const account = await horizon.loadAccount(wallet.address)
+  const transaction = new StellarSdk.TransactionBuilder(account, {
+    fee: StellarSdk.BASE_FEE,
+    networkPassphrase: wallet.networkPassphrase || STELLAR_NETWORK_PASSPHRASE,
+  }).addOperation(StellarSdk.Operation.payment({
+    destination: recipient,
+    asset: StellarSdk.Asset.native(),
+    amount: value.toFixed(7).replace(/0+$/, '').replace(/\.$/, ''),
+  })).addMemo(StellarSdk.Memo.text(`SN tip ${postId}`)).setTimeout(300).build()
+
+  onProgress?.('awaiting-wallet')
+  const signedXdr = await signStellarTransaction(transaction.toXDR(), wallet.address, wallet.networkPassphrase, wallet.provider)
+  const signed = StellarSdk.TransactionBuilder.fromXDR(signedXdr, wallet.networkPassphrase) as StellarSdk.Transaction
+  const expectedHash = Buffer.from(signed.hash()).toString('hex')
+  onProgress?.('confirming')
+  try {
+    const result = await horizon.submitTransaction(signed)
+    return { hash: result.hash, amount: cleanAmount }
+  } catch (error) {
+    // A transport error can arrive after Horizon accepted the payment. Check
+    // the locally known transaction hash before telling the user to retry.
+    try {
+      const confirmed = await horizon.transactions().transaction(expectedHash).call()
+      if (confirmed.successful) return { hash: expectedHash, amount: cleanAmount }
+    } catch { /* Horizon has no confirmed transaction at this hash. */ }
+    const cause = error as { response?: { data?: { extras?: { result_codes?: { transaction?: string; operations?: string[] } } } }; message?: string }
+    const operationCode = cause.response?.data?.extras?.result_codes?.operations?.[0]
+    const transactionCode = cause.response?.data?.extras?.result_codes?.transaction
+    const detail = operationCode || transactionCode || cause.message
+    throw new Error(detail ? `Stellar could not confirm the tip (${detail})` : 'Stellar could not confirm the tip')
+  }
+}
+
+/** Send one direct native XLM payment tagged for a creator-service order. */
+export async function sendXlmOrderPayment(wallet: StellarWallet, recipient: string, orderId: number, amount: string, onProgress?: (stage: 'awaiting-wallet' | 'confirming') => void) {
+  const cleanAmount = amount.trim()
+  const value = Number(cleanAmount)
+  if (!/^\d+(?:\.\d{1,7})?$/.test(cleanAmount) || !Number.isFinite(value) || value <= 0 || value > 10_000) throw new Error('Enter an XLM payment between 0.0000001 and 10,000 XLM')
+  if (!/^G[A-Z2-7]{55}$/.test(recipient) || recipient.toLowerCase() === wallet.address.toLowerCase()) throw new Error('This creator does not have a valid receiving wallet')
+  if (!Number.isSafeInteger(orderId) || orderId <= 0) throw new Error('This order has an invalid payment reference')
+  const horizonUrl = wallet.network === 'PUBLIC' ? 'https://horizon.stellar.org' : 'https://horizon-testnet.stellar.org'
+  const horizon = new StellarSdk.Horizon.Server(horizonUrl)
+  const account = await horizon.loadAccount(wallet.address)
+  const transaction = new StellarSdk.TransactionBuilder(account, {
+    fee: StellarSdk.BASE_FEE,
+    networkPassphrase: wallet.networkPassphrase || STELLAR_NETWORK_PASSPHRASE,
+  }).addOperation(StellarSdk.Operation.payment({
+    destination: recipient,
+    asset: StellarSdk.Asset.native(),
+    amount: value.toFixed(7).replace(/0+$/, '').replace(/\.$/, ''),
+  })).addMemo(StellarSdk.Memo.text(`SN order ${orderId}`)).setTimeout(300).build()
+  onProgress?.('awaiting-wallet')
+  const signedXdr = await signStellarTransaction(transaction.toXDR(), wallet.address, wallet.networkPassphrase, wallet.provider)
+  const signed = StellarSdk.TransactionBuilder.fromXDR(signedXdr, wallet.networkPassphrase) as StellarSdk.Transaction
+  const expectedHash = Buffer.from(signed.hash()).toString('hex')
+  onProgress?.('confirming')
+  try {
+    const result = await horizon.submitTransaction(signed)
+    return { hash: result.hash, amount: cleanAmount }
+  } catch (error) {
+    try {
+      const confirmed = await horizon.transactions().transaction(expectedHash).call()
+      if (confirmed.successful) return { hash: expectedHash, amount: cleanAmount }
+    } catch { /* Horizon has no confirmed transaction at this hash. */ }
+    const cause = error as { response?: { data?: { extras?: { result_codes?: { transaction?: string; operations?: string[] } } } }; message?: string }
+    const code = cause.response?.data?.extras?.result_codes?.operations?.[0] || cause.response?.data?.extras?.result_codes?.transaction || cause.message
+    throw new Error(code ? `Stellar could not confirm the payment (${code})` : 'Stellar could not confirm the payment')
+  }
 }
 
 /**

@@ -11,8 +11,9 @@ import * as StellarSdk from '@stellar/stellar-sdk'
 import { PrivyClient } from '@privy-io/node'
 import { PutObjectCommand, S3Client } from '@aws-sdk/client-s3'
 import { checkDatabaseConnection, databaseAvailable, ensureSchema, query, readIndexerCheckpoint, withTransaction } from './db.js'
-import { indexConfirmedMint, indexerStatus, reconcileMarketplaceStateForWallet, reconcileOwnershipAgainstSoroban, runIndexerOnce, sendOfferExpiryReminders, startIndexer } from './indexer.js'
+import { indexConfirmedMint, indexerStatus, reconcileMarketplaceStateForWallet, reconcileOwnershipAgainstSoroban, runIndexerOnce, runMarketplaceKeeper, sendOfferExpiryReminders, startIndexer } from './indexer.js'
 import { mailConfigured, marketplaceEmail, sendMail, welcomeEmail } from './mail.js'
+import { browserPushConfig, notifyUser } from './push.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const root = path.resolve(__dirname, '..')
@@ -60,16 +61,43 @@ const r2 = r2Enabled ? new S3Client({
 
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 25 * 1024 * 1024 },
+  limits: { fileSize: 25 * 1024 * 1024, files: 1, fields: 12, fieldSize: 16 * 1024, parts: 13, headerPairs: 100 },
 })
 const visionUpload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 5 * 1024 * 1024 },
+  limits: { fileSize: 5 * 1024 * 1024, files: 1, fields: 4, fieldSize: 8 * 1024, parts: 5, headerPairs: 100 },
 })
 
 const app = express()
 app.disable('x-powered-by')
-app.set('trust proxy', true)
+// Vercel overwrites X-Forwarded-For at its edge. Do not trust arbitrary
+// forwarded headers when this Express app is run directly elsewhere.
+app.set('trust proxy', isVercel)
+const requestRateBuckets = new Map<string, { count: number; resetsAt: number }>()
+function processRateLimit(scope: string, maxRequests: number, windowMs: number): express.RequestHandler {
+  return (req, res, next) => {
+    const now = Date.now()
+    const clientIp = req.ip || req.socket.remoteAddress || 'unknown'
+    const key = `${scope}:${clientIp}`
+    let bucket = requestRateBuckets.get(key)
+    if (!bucket || bucket.resetsAt <= now) {
+      bucket = { count: 0, resetsAt: now + windowMs }
+      requestRateBuckets.set(key, bucket)
+    }
+    bucket.count += 1
+    if (bucket.count > maxRequests) {
+      res.setHeader('Retry-After', String(Math.max(1, Math.ceil((bucket.resetsAt - now) / 1000))))
+      return res.status(429).json({ error: 'Too many requests. Please wait and try again.' })
+    }
+    if (requestRateBuckets.size > 10_000) {
+      for (const [entryKey, entry] of requestRateBuckets) {
+        if (entry.resetsAt <= now) requestRateBuckets.delete(entryKey)
+      }
+      while (requestRateBuckets.size > 10_000) requestRateBuckets.delete(requestRateBuckets.keys().next().value!)
+    }
+    next()
+  }
+}
 app.use((req, res, next) => {
   const suppliedId = req.header('x-request-id') ?? ''
   const requestId = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(suppliedId)
@@ -80,6 +108,9 @@ app.use((req, res, next) => {
   res.setHeader('X-Content-Type-Options', 'nosniff')
   res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin')
   res.setHeader('X-Frame-Options', 'DENY')
+  res.setHeader('Content-Security-Policy', "object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'")
+  res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()')
+  if (isProduction) res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains')
   res.on('finish', () => {
     if (!req.path.startsWith('/api/')) return
     const statusCode = res.statusCode
@@ -104,13 +135,94 @@ app.use((req, res, next) => {
   })
   next()
 })
+// A bounded per-process backstop for accidental loops and burst abuse. Vercel
+// WAF remains the distributed edge control; this map is intentionally not
+// treated as a substitute for it across serverless instances.
+app.use('/api', processRateLimit('api', 300, 60_000))
 app.use(express.json({ limit: '256kb' }))
+
+app.get('/api/feedback', async (_req, res) => {
+  if (!databaseAvailable()) return res.status(503).json({ error: 'Feedback is temporarily unavailable' })
+  try {
+    await ensureSchema()
+    const entries = await query<{ id: number; category: 'idea' | 'problem' | 'praise'; title: string; body: string; status: 'new' | 'planned' | 'in_progress' | 'done'; created_at: string }[]>(
+      `SELECT id, category, title, body, status, created_at FROM public_feedback ORDER BY created_at DESC LIMIT 100`,
+    )
+    res.setHeader('Cache-Control', 'no-store')
+    res.json({ entries })
+  } catch (error) {
+    res.status(503).json({ error: error instanceof Error ? error.message : 'Feedback is temporarily unavailable' })
+  }
+})
+
+app.post('/api/feedback', processRateLimit('public-feedback', 5, 60 * 60_000), async (req, res) => {
+  if (!databaseAvailable()) return res.status(503).json({ error: 'Feedback is temporarily unavailable' })
+  const category = String(req.body?.category ?? '').trim()
+  const title = String(req.body?.title ?? '').trim()
+  const body = String(req.body?.body ?? '').trim()
+  if (!['idea', 'problem', 'praise'].includes(category)) return res.status(400).json({ error: 'Choose an idea, problem, or praise category.' })
+  if (title.length < 4 || title.length > 120) return res.status(400).json({ error: 'Title must be 4–120 characters.' })
+  if (body.length < 10 || body.length > 2000) return res.status(400).json({ error: 'Details must be 10–2,000 characters.' })
+  try {
+    await ensureSchema()
+    const rows = await query<{ id: number; category: 'idea' | 'problem' | 'praise'; title: string; body: string; status: 'new' | 'planned' | 'in_progress' | 'done'; created_at: string }[]>(
+      `INSERT INTO public_feedback (category, title, body) VALUES (?, ?, ?) RETURNING id, category, title, body, status, created_at`,
+      [category, title, body],
+    )
+    res.status(201).json({ entry: rows[0] })
+  } catch (error) {
+    res.status(503).json({ error: error instanceof Error ? error.message : 'Feedback could not be saved' })
+  }
+})
 
 function escapeHtml(value: unknown): string {
   return String(value ?? '').replace(/[&<>\"']/g, (character) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '\"': '&quot;', "'": '&#39;' })[character]!)
 }
 
-const publicSiteOrigin = (process.env.PUBLIC_SITE_URL || 'https://stellanova-fawn.vercel.app').replace(/\/$/, '')
+function stripAiMarkdown(value: string): string {
+  return value
+    .replace(/```(?:json|markdown|text)?\s*([\s\S]*?)```/gi, '$1')
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
+    .replace(/\*\*([^*]+)\*\*/g, '$1')
+    .replace(/__([^_]+)__/g, '$1')
+    .replace(/(?<!\w)\*([^*\n]+)\*(?!\w)/g, '$1')
+    .replace(/(?<!\w)_([^_\n]+)_(?!\w)/g, '$1')
+    .replace(/~~([^~]+)~~/g, '$1')
+    .replace(/`([^`]+)`/g, '$1')
+    .replace(/^\s{0,3}#{1,6}\s*/gm, '')
+    .replace(/^\s{0,3}>\s?/gm, '')
+    .replace(/^\s*(?:[-+*]|\d+[.)])\s+/gm, '')
+    .trim()
+}
+
+function extractAiJsonObject<T>(value: string): T | null {
+  const text = stripAiMarkdown(value)
+  let start = -1
+  let depth = 0
+  let inString = false
+  let escaped = false
+  for (let index = 0; index < text.length; index += 1) {
+    const character = text[index]
+    if (start < 0) {
+      if (character === '{') { start = index; depth = 1 }
+      continue
+    }
+    if (inString) {
+      if (escaped) escaped = false
+      else if (character === '\\') escaped = true
+      else if (character === '"') inString = false
+      continue
+    }
+    if (character === '"') inString = true
+    else if (character === '{') depth += 1
+    else if (character === '}' && --depth === 0) {
+      try { return JSON.parse(text.slice(start, index + 1)) as T } catch { return null }
+    }
+  }
+  return null
+}
+
+const publicSiteOrigin = (process.env.PUBLIC_SITE_URL || 'https://stelanova.vercel.app').replace(/\/$/, '')
 
 app.get(['/api/robots.txt', '/robots.txt'], (_req, res) => {
   res.type('text/plain').send([
@@ -137,12 +249,12 @@ app.get(['/api/sitemap.xml', '/sitemap.xml'], async (_req, res) => {
         query<{ slug: string }[]>('SELECT slug FROM collections WHERE contract_id IS NOT NULL ORDER BY created_at DESC LIMIT 5000'),
         query<{ contract_id: string; token_id: number }[]>('SELECT contract_id, token_id FROM nft_mints WHERE contract_id IS NOT NULL ORDER BY created_at DESC LIMIT 5000'),
         query<{ id: number }[]>('SELECT id FROM posts WHERE COALESCE((to_jsonb(posts)->>\'is_demo\')::boolean, FALSE) = FALSE ORDER BY created_at DESC LIMIT 5000'),
-        query<{ wallet_address: string }[]>('SELECT wallet_address FROM user_profiles WHERE is_creator = TRUE ORDER BY updated_at DESC LIMIT 5000'),
+        query<{ wallet_address: string; creator_username: string | null }[]>('SELECT wallet_address, creator_username FROM user_profiles ORDER BY updated_at DESC LIMIT 5000'),
       ])
       for (const row of collectionRows) publicUrls.add(`${publicSiteOrigin}/collection/${encodeURIComponent(row.slug)}`)
       for (const row of nftRows) publicUrls.add(`${publicSiteOrigin}/nft/minted-${encodeURIComponent(row.contract_id.toLowerCase())}-${row.token_id}`)
       for (const row of postRows) publicUrls.add(`${publicSiteOrigin}/post/${row.id}`)
-      for (const row of creatorRows) publicUrls.add(`${publicSiteOrigin}/creator/${encodeURIComponent(row.wallet_address)}`)
+      for (const row of creatorRows) publicUrls.add(`${publicSiteOrigin}/creator/${encodeURIComponent(row.creator_username || row.wallet_address)}`)
     } catch (error) {
       console.error('Public sitemap could not load dynamic routes', error)
       return res.status(503).type('text/plain').send('Sitemap is temporarily unavailable')
@@ -170,19 +282,21 @@ app.get(['/api/share/page/:page', '/explore', '/collections'], async (req, res) 
 })
 
 app.get(['/api/share/creator/:id', '/creator/:id'], async (req, res) => {
-  const id = String(req.params.id ?? '')
-  if (!stellarAddress.test(id)) return res.status(404).type('text/plain').send('Creator not found')
+  const id = String(req.params.id ?? '').trim().replace(/^@/, '')
+  const isWallet = stellarAddress.test(id)
+  if (!isWallet && !/^[a-z][a-z0-9_]{2,23}$/i.test(id)) return res.status(404).type('text/plain').send('Creator not found')
   if (!databaseAvailable()) return res.status(503).type('text/plain').send('Creator information is temporarily unavailable')
   try {
     await ensureSchema()
-    const profiles = await query<{ display_name: string; creator_username: string | null; bio: string; is_creator: boolean }[]>(
-      'SELECT display_name, creator_username, bio, is_creator FROM user_profiles WHERE wallet_address = ? LIMIT 1', [id],
+    const profiles = await query<{ wallet_address: string; display_name: string; creator_username: string | null; bio: string }[]>(
+      'SELECT wallet_address, display_name, creator_username, bio FROM user_profiles WHERE (? = TRUE AND lower(wallet_address) = lower(?)) OR lower(creator_username) = lower(?) LIMIT 1', [isWallet, id, id],
     )
     const profile = profiles[0]
-    if (!profile?.is_creator) return res.status(404).type('text/plain').send('Creator not found')
+    if (!profile) return res.status(404).type('text/plain').send('Creator not found')
     const name = profile.creator_username ? `@${profile.creator_username}` : profile.display_name.trim() || 'Stellar creator'
     const description = profile.bio.trim() || `Explore artwork and collections from ${name} on StellaNova.`
-    return await sendSocialPage(res, { title: `${name} · StellaNova`, description, url: `${publicSiteOrigin}/creator/${encodeURIComponent(id)}` })
+    const publicId = profile.creator_username || profile.wallet_address
+    return await sendSocialPage(res, { title: `${name} · StellaNova`, description, url: `${publicSiteOrigin}/creator/${encodeURIComponent(publicId)}` })
   } catch (error) {
     console.error('Creator page render failed', error)
     return res.status(503).type('text/plain').send('Creator information is temporarily unavailable')
@@ -291,8 +405,8 @@ app.get(['/api/share/post/:id', '/post/:id'], async (req, res) => {
   const url = `${baseUrl}/post/${postId}`
   try {
     await ensureSchema()
-    const rows = await query<{ caption: string; media_url: string; avatar: string; author_name: string; author_type: 'user' | 'collection'; collection_name: string | null }[]>(
-        `SELECT p.caption, p.media_url, p.avatar, p.author_name, p.author_type, c.name AS collection_name
+    const rows = await query<{ caption: string; media_url: string; avatar: string; author_name: string; author_type: 'user' | 'collection'; collection_name: string | null; linked_nft_id: string | null }[]>(
+        `SELECT p.caption, p.media_url, p.avatar, p.author_name, p.author_type, c.name AS collection_name, p.linked_nft_id
          FROM posts p LEFT JOIN collections c ON c.slug = p.collection_id
          WHERE p.id = ? AND COALESCE((to_jsonb(p)->>'is_demo')::boolean, FALSE) = FALSE LIMIT 1`,
         [postId],
@@ -300,10 +414,28 @@ app.get(['/api/share/post/:id', '/post/:id'], async (req, res) => {
     const post = rows[0]
     if (!post) return res.status(404).type('text/plain').send('Post not found')
     const author = post.author_type === 'collection' ? post.collection_name || post.author_name : post.author_name || 'Creator'
+    let linkedNftImage: string | null = null
+    const linkedNftMatch = /^minted-([A-Z0-9]{56})-(\d+)$/i.exec(post.linked_nft_id ?? '')
+    if (!post.media_url && linkedNftMatch) {
+      const linkedNfts = await query<{ image: string | null; collection_cover: string | null; collection_revealed: boolean | null }[]>(
+        `SELECT CASE WHEN c.revealed = FALSE THEN NULLIF(c.cover, '')
+                     ELSE COALESCE(NULLIF(meta.image, ''), NULLIF(m.image, ''))
+                END AS image,
+                c.cover AS collection_cover, c.revealed AS collection_revealed
+         FROM nft_mints m
+         INNER JOIN verified_nft_mints v ON v.contract_id = m.contract_id AND v.token_id = m.token_id
+         LEFT JOIN creator_nft_metadata meta ON meta.metadata_uri = m.metadata_uri
+         LEFT JOIN collections c ON c.slug = m.collection_id
+         WHERE LOWER(m.contract_id) = LOWER(?) AND m.token_id = ? LIMIT 1`,
+        [linkedNftMatch[1], Number(linkedNftMatch[2])],
+      )
+      const linkedNft = linkedNfts[0]
+      linkedNftImage = linkedNft?.image || (linkedNft?.collection_revealed === false ? linkedNft.collection_cover : null) || null
+    }
     return await sendSocialPage(res, {
       title: `${author} shared a post · StellaNova`,
       description: post.caption?.trim() || `View ${author}'s post on StellaNova.`,
-      image: post.media_url || post.avatar,
+      image: post.media_url || linkedNftImage || post.avatar,
       url,
       type: 'article',
     })
@@ -313,7 +445,7 @@ app.get(['/api/share/post/:id', '/post/:id'], async (req, res) => {
   }
 })
 
-const stellarAddress = /^G[A-Z2-7]{55}$/
+const stellarAddress = /^G[A-Z2-7]{55}$/i
 const pendingTestnetFunding = new Map<string, Promise<void>>()
 const privyClient = process.env.PRIVY_APP_ID && process.env.PRIVY_APP_SECRET
   ? new PrivyClient({ appId: process.env.PRIVY_APP_ID, appSecret: process.env.PRIVY_APP_SECRET })
@@ -350,7 +482,42 @@ async function ensureTestnetAccountFunded(wallet: string): Promise<void> {
   }
 }
 
-app.post('/api/auth/privy/session', async (req, res) => {
+async function hasWalletHistory(wallet: string): Promise<boolean> {
+  const rows = await query<{ found: boolean }[]>(
+    `SELECT (
+      EXISTS (SELECT 1 FROM collections WHERE LOWER(owner_wallet) = LOWER(?)) OR
+      EXISTS (SELECT 1 FROM user_profiles WHERE LOWER(wallet_address) = LOWER(?)) OR
+      EXISTS (SELECT 1 FROM posts WHERE LOWER(author) = LOWER(?)) OR
+      EXISTS (SELECT 1 FROM verified_nft_mints WHERE LOWER(minter) = LOWER(?)) OR
+      EXISTS (SELECT 1 FROM notifications WHERE LOWER(wallet_address) = LOWER(?)) OR
+      EXISTS (SELECT 1 FROM creator_media_uploads WHERE LOWER(creator_wallet) = LOWER(?)) OR
+      EXISTS (SELECT 1 FROM nft_likes WHERE LOWER(wallet_address) = LOWER(?)) OR
+      EXISTS (SELECT 1 FROM nft_comments WHERE LOWER(wallet_address) = LOWER(?)) OR
+      EXISTS (SELECT 1 FROM nft_bookmarks WHERE LOWER(wallet_address) = LOWER(?)) OR
+      EXISTS (SELECT 1 FROM post_likes WHERE LOWER(wallet_address) = LOWER(?)) OR
+      EXISTS (SELECT 1 FROM post_comments WHERE LOWER(wallet_address) = LOWER(?)) OR
+      EXISTS (SELECT 1 FROM creator_follows WHERE LOWER(wallet_address) = LOWER(?)) OR
+      EXISTS (SELECT 1 FROM collection_subscriptions WHERE LOWER(wallet_address) = LOWER(?))
+    ) AS found`,
+    Array.from({ length: 13 }, () => wallet),
+  )
+  return Boolean(rows[0]?.found)
+}
+
+async function attributeNewWalletReferral(wallet: string, rawCode: unknown): Promise<boolean> {
+  const code = String(rawCode ?? '').trim().toUpperCase()
+  if (!/^[A-F0-9]{16}$/.test(code)) return false
+  const referrer = await query<{ wallet_address: string }[]>('SELECT wallet_address FROM referral_codes WHERE code = ? LIMIT 1', [code])
+  const referrerWallet = referrer[0]?.wallet_address
+  if (!referrerWallet || referrerWallet.toLowerCase() === wallet.toLowerCase()) return false
+  const result = await query<{ referred_wallet: string }[]>(
+    'INSERT INTO referrals (referred_wallet, referrer_wallet, referral_code) VALUES (?, ?, ?) ON CONFLICT (referred_wallet) DO NOTHING RETURNING referred_wallet',
+    [wallet, referrerWallet, code],
+  )
+  return result.length > 0
+}
+
+app.post('/api/auth/privy/session', processRateLimit('privy-session', 20, 10 * 60_000), async (req, res) => {
   if (!privyClient) return res.status(503).json({ error: 'Email wallet sign-in is not configured yet' })
   if (!databaseAvailable()) return res.status(503).json({ error: 'Persistent database is not configured' })
   const authorization = req.header('authorization') ?? ''
@@ -365,10 +532,11 @@ app.post('/api/auth/privy/session', async (req, res) => {
     }
     const emailAccount = user.linked_accounts.find((linked) => linked.type === 'email')
     const accountEmail = emailAccount && 'address' in emailAccount && typeof emailAccount.address === 'string' ? emailAccount.address.trim().toLowerCase() : ''
-    if (accountEmail) {
-      await ensureSchema()
-      await query('INSERT INTO user_profiles (wallet_address, email) VALUES (?, ?) ON CONFLICT (wallet_address) DO UPDATE SET email = EXCLUDED.email, updated_at = now()', [account.address, accountEmail])
-    }
+    await ensureSchema()
+    const freshAccount = await query<{ wallet_address: string }[]>('INSERT INTO wallet_accounts (wallet_address) VALUES (?) ON CONFLICT (wallet_address) DO NOTHING RETURNING wallet_address', [account.address])
+    const firstAccountUse = freshAccount.length > 0 && !(await hasWalletHistory(account.address))
+    await query('INSERT INTO user_profiles (wallet_address, email) VALUES (?, ?) ON CONFLICT (wallet_address) DO UPDATE SET email = COALESCE(EXCLUDED.email, user_profiles.email), updated_at = now()', [account.address, accountEmail || null])
+    const referralApplied = firstAccountUse ? await attributeNewWalletReferral(account.address, req.body?.referralCode) : false
     if (String(process.env.VITE_STELLAR_NETWORK ?? 'TESTNET').toUpperCase() === 'TESTNET') {
       try {
         await ensureTestnetAccountFunded(account.address)
@@ -401,7 +569,7 @@ app.post('/api/auth/privy/session', async (req, res) => {
         console.warn('Welcome email could not be sent:', error instanceof Error ? error.message : 'unknown error')
       }
     }
-    res.json({ token, wallet: account.address, expiresAt: expiresAt.toISOString() })
+    res.json({ token, wallet: account.address, newAccount: firstAccountUse, referralApplied, expiresAt: expiresAt.toISOString() })
   } catch {
     res.status(401).json({ error: 'Your email session is invalid or expired. Please sign in again.' })
   }
@@ -419,7 +587,7 @@ app.post('/api/auth/logout', async (req, res) => {
   res.status(204).end()
 })
 
-app.post('/api/auth/challenge', async (req, res) => {
+app.post('/api/auth/challenge', processRateLimit('wallet-challenge', 20, 10 * 60_000), async (req, res) => {
   if (!databaseAvailable()) return res.status(503).json({ error: 'Persistent database is not configured' })
   const wallet = String(req.body?.wallet ?? '')
   if (!stellarAddress.test(wallet)) return res.status(400).json({ error: 'A valid Stellar wallet address is required' })
@@ -436,7 +604,7 @@ app.post('/api/auth/challenge', async (req, res) => {
   }
 })
 
-app.post('/api/auth/verify', async (req, res) => {
+app.post('/api/auth/verify', processRateLimit('wallet-verify', 30, 10 * 60_000), async (req, res) => {
   if (!databaseAvailable()) return res.status(503).json({ error: 'Persistent database is not configured' })
   const challengeId = String(req.body?.challengeId ?? '')
   const wallet = String(req.body?.wallet ?? '')
@@ -449,13 +617,17 @@ app.post('/api/auth/verify', async (req, res) => {
     const keypair = StellarSdk.Keypair.fromPublicKey(wallet)
     const signatureBytes = Buffer.from(signature, 'base64')
     if (signatureBytes.length !== 64 || !keypair.verifyMessage(challenge[0].message, signatureBytes)) return res.status(401).json({ error: 'Wallet signature is invalid' })
+    const freshAccount = await query<{ wallet_address: string }[]>('INSERT INTO wallet_accounts (wallet_address) VALUES (?) ON CONFLICT (wallet_address) DO NOTHING RETURNING wallet_address', [wallet])
+    const firstAccountUse = freshAccount.length > 0 && !(await hasWalletHistory(wallet))
+    if (firstAccountUse && /^[A-F0-9]{16}$/i.test(String(req.body?.referralCode ?? '').trim())) await query('INSERT INTO user_profiles (wallet_address) VALUES (?) ON CONFLICT (wallet_address) DO NOTHING', [wallet])
+    const referralApplied = firstAccountUse ? await attributeNewWalletReferral(wallet, req.body?.referralCode) : false
     const token = crypto.randomBytes(32).toString('base64url')
     const expiresAt = new Date(Date.now() + 12 * 60 * 60_000)
     const tokenHash = sha256(Buffer.from(token))
     const consumed = await query<{ challenge_id: string }[]>('DELETE FROM wallet_auth_challenges WHERE challenge_id = ? AND expires_at > now() RETURNING challenge_id', [challengeId])
     if (!consumed.length) return res.status(401).json({ error: 'Sign-in challenge was already used; try signing in again' })
     await query('INSERT INTO wallet_sessions (token_hash, wallet_address, expires_at) VALUES (?, ?, ?)', [tokenHash, wallet, expiresAt])
-    res.json({ token, wallet, expiresAt: expiresAt.toISOString() })
+    res.json({ token, wallet, newAccount: firstAccountUse, referralApplied, expiresAt: expiresAt.toISOString() })
   } catch (error) {
     if (error instanceof Error && error.message.includes('Wallet signature')) return res.status(401).json({ error: error.message })
     console.error('Wallet verification failed:', error)
@@ -480,6 +652,317 @@ async function requireWallet(req: express.Request, res: express.Response, next: 
     next()
   } catch (error) { res.status(503).json({ error: error instanceof Error ? error.message : 'Wallet session lookup failed' }) }
 }
+
+const stellarWalletPattern = /^G[A-Z2-7]{55}$/i
+const validXlmAmount = (value: unknown) => {
+  const amount = String(value ?? '').trim()
+  return /^\d{1,8}(?:\.\d{1,7})?$/.test(amount) && Number(amount) > 0 && Number(amount) <= 10_000 ? amount : ''
+}
+const xlmStroops = (value: unknown) => {
+  const amount = String(value ?? '').trim()
+  if (!/^\d+(?:\.\d{1,7})?$/.test(amount)) return null
+  const [whole, fraction = ''] = amount.split('.')
+  try { return BigInt(whole) * 10_000_000n + BigInt(fraction.padEnd(7, '0')) } catch { return null }
+}
+const safePublicUrl = (value: unknown) => {
+  const raw = String(value ?? '').trim()
+  if (!raw) return null
+  try { const parsed = new URL(raw); return ['http:', 'https:'].includes(parsed.protocol) && raw.length <= 2048 ? raw : null } catch { return null }
+}
+
+app.get('/api/creator-services', async (req, res) => {
+  try {
+    await ensureSchema()
+    const category = String(req.query.category ?? '')
+    const categoryFilter = ['commission', 'creative_service'].includes(category) ? category : null
+    const items = await query<Record<string, unknown>[]>(
+      `SELECT l.id, l.creator_wallet, COALESCE(a.creator_username, NULLIF(a.display_name,''), l.creator_wallet) AS creator_name,
+        l.title, l.category, l.description, l.image_url, l.pricing_type, l.price_xlm::text AS price_xlm,
+        l.availability, l.delivery_details, l.status, l.created_at
+       FROM creator_service_listings l LEFT JOIN user_profiles a ON LOWER(a.wallet_address)=LOWER(l.creator_wallet)
+       WHERE l.status IN ('published','sold') AND (?::text IS NULL OR l.category=?) ORDER BY l.created_at DESC LIMIT 100`,
+      [categoryFilter, categoryFilter],
+    )
+    res.json({ items })
+  } catch (error) { res.status(503).json({ error: error instanceof Error ? error.message : 'Could not load creator services' }) }
+})
+app.get('/api/creator-services/mine', requireWallet, async (_req,res) => {
+  const wallet=res.locals.wallet as string
+  await ensureSchema()
+  const items=await query<Record<string,unknown>[]>(`SELECT l.id,l.creator_wallet,COALESCE(p.creator_username,NULLIF(p.display_name,''),l.creator_wallet) AS creator_name,l.title,l.category,l.description,l.image_url,l.pricing_type,l.price_xlm::text AS price_xlm,l.availability,l.delivery_details,l.status,l.created_at FROM creator_service_listings l LEFT JOIN user_profiles p ON LOWER(p.wallet_address)=LOWER(l.creator_wallet) WHERE LOWER(l.creator_wallet)=LOWER(?) ORDER BY l.created_at DESC LIMIT 100`,[wallet])
+  res.json({items})
+})
+
+app.post('/api/creator-services', processRateLimit('creator-service-create', 6, 10 * 60_000), requireWallet, async (req, res) => {
+  const wallet = res.locals.wallet as string
+  const { title, category, description, imageUrl, pricingType, priceXlm, availability, deliveryDetails } = req.body ?? {}
+  const cleanTitle = String(title ?? '').trim()
+  const cleanDescription = String(description ?? '').trim()
+  const validCategory = ['commission', 'creative_service'].includes(category)
+  const validPricing = ['quote', 'starting_at', 'fixed'].includes(pricingType)
+  const amount = validXlmAmount(priceXlm)
+  const portfolioUrl = safePublicUrl(imageUrl)
+  if (imageUrl && !portfolioUrl) return res.status(400).json({ error: 'Portfolio images must use a valid http or https URL.' })
+  if (cleanTitle.length < 3 || cleanTitle.length > 120 || cleanDescription.length < 20 || cleanDescription.length > 3000 || !validCategory || !validPricing || ((pricingType === 'fixed' || pricingType === 'starting_at') && !amount)) return res.status(400).json({ error: 'Check the title, 20–3,000 character description, service type, and XLM price.' })
+  await ensureSchema()
+  const result = await query<{ id: number }[]>(
+    `INSERT INTO creator_service_listings (creator_wallet,title,category,description,image_url,pricing_type,price_xlm,availability,delivery_details)
+     VALUES (?,?,?,?,?,?,?,?,?) RETURNING id`,
+    [wallet, cleanTitle, category, cleanDescription, portfolioUrl, pricingType, amount || null, String(availability ?? 'available').slice(0, 32), String(deliveryDetails ?? '').slice(0, 1000)],
+  )
+  res.status(201).json({ id: result[0]?.id })
+})
+
+app.patch('/api/creator-services/:id', processRateLimit('creator-service-update', 20, 10 * 60_000), requireWallet, async (req, res) => {
+  const wallet = res.locals.wallet as string
+  const id = Number(req.params.id)
+  const status = String(req.body?.status ?? '')
+  if (!Number.isSafeInteger(id) || id <= 0 || !['published', 'paused'].includes(status)) return res.status(400).json({ error: 'Invalid listing update' })
+  const updated = await query<{ id: number }[]>(`UPDATE creator_service_listings SET status=?, updated_at=now() WHERE id=? AND LOWER(creator_wallet)=LOWER(?) AND status <> 'sold' RETURNING id`, [status, id, wallet])
+  if (!updated.length) return res.status(404).json({ error: 'Listing not found or already sold' })
+  res.json({ ok: true })
+})
+
+app.get('/api/creator-service-requests', requireWallet, async (_req, res) => {
+  const wallet = res.locals.wallet as string
+  await ensureSchema()
+  const items = await query<Record<string, unknown>[]>(
+    `SELECT r.id, r.listing_id, r.buyer_wallet, r.creator_wallet, r.brief, r.delivery_address, r.status,
+      r.agreed_amount_xlm::text AS agreed_amount_xlm, r.transaction_hash, r.creator_note, r.created_at,
+      l.title, l.category, l.pricing_type, l.price_xlm::text AS listing_price_xlm
+     FROM creator_service_requests r JOIN creator_service_listings l ON l.id=r.listing_id
+     WHERE LOWER(r.buyer_wallet)=LOWER(?) OR LOWER(r.creator_wallet)=LOWER(?) ORDER BY r.created_at DESC LIMIT 100`, [wallet, wallet],
+  )
+  res.json({ items })
+})
+
+app.post('/api/creator-service-requests', processRateLimit('creator-service-request', 10, 10 * 60_000), requireWallet, async (req, res) => {
+  const wallet = res.locals.wallet as string
+  const listingId = Number(req.body?.listingId)
+  const brief = String(req.body?.brief ?? '').trim()
+  const deliveryAddress = String(req.body?.deliveryAddress ?? '').trim()
+  if (!Number.isSafeInteger(listingId) || listingId <= 0 || brief.length < 10 || brief.length > 3000 || deliveryAddress.length > 1000) return res.status(400).json({ error: 'Add a request brief between 10 and 3,000 characters.' })
+  await ensureSchema()
+  const listing = await query<{ creator_wallet: string; category: string; status: string }[]>(`SELECT creator_wallet, category, status FROM creator_service_listings WHERE id=?`, [listingId])
+  if (!listing.length || listing[0].status !== 'published') return res.status(404).json({ error: 'This listing is unavailable.' })
+  if (listing[0].creator_wallet.toLowerCase() === wallet.toLowerCase()) return res.status(400).json({ error: 'You cannot request your own listing.' })
+  const created = await query<{ id: number }[]>(`INSERT INTO creator_service_requests (listing_id,buyer_wallet,creator_wallet,brief,delivery_address) VALUES (?,?,?,?,?) RETURNING id`, [listingId, wallet, listing[0].creator_wallet, brief, null])
+  await query(`INSERT INTO notifications (wallet_address,kind,title,body,action_url) VALUES (?,?,?,?,?)`, [listing[0].creator_wallet, 'service_request', 'New creator service request', 'A buyer sent a request. Review the brief and set the XLM terms.', '/services'])
+  res.status(201).json({ id: created[0]?.id })
+})
+
+app.patch('/api/creator-service-requests/:id', processRateLimit('creator-service-request-update', 20, 10 * 60_000), requireWallet, async (req, res) => {
+  const wallet = res.locals.wallet as string
+  const id = Number(req.params.id)
+  const action = String(req.body?.action ?? '')
+  if (!Number.isSafeInteger(id) || id <= 0 || !['accept', 'decline', 'in_progress', 'shipped', 'delivered', 'complete'].includes(action)) return res.status(400).json({ error: 'Invalid request update' })
+  await ensureSchema()
+  const rows = await query<{ creator_wallet: string; buyer_wallet: string; status: string; listing_id: number; category: string; pricing_type: string; price_xlm: string | null }[]>(`SELECT r.creator_wallet,r.buyer_wallet,r.status,r.listing_id,l.category,l.pricing_type,l.price_xlm::text FROM creator_service_requests r JOIN creator_service_listings l ON l.id=r.listing_id WHERE r.id=?`, [id])
+  if (!rows.length) return res.status(404).json({ error: 'Request not found' })
+  const row = rows[0]
+  const creator = row.creator_wallet.toLowerCase() === wallet.toLowerCase()
+  const buyer = row.buyer_wallet.toLowerCase() === wallet.toLowerCase()
+  const note = String(req.body?.note ?? '').trim().slice(0, 1000)
+  if (action === 'accept' || action === 'decline') {
+    if (!creator || row.status !== 'requested') return res.status(403).json({ error: 'Only the creator can respond to a pending request.' })
+    if (action === 'decline') {
+      const changed=await query<{id:number}[]>(`UPDATE creator_service_requests SET status='declined',creator_note=?,updated_at=now() WHERE id=? AND status='requested' RETURNING id`,[note,id])
+      if (!changed.length) return res.status(409).json({ error: 'This request has already changed.' })
+    }
+    else {
+      const amount = validXlmAmount(req.body?.amountXlm ?? row.price_xlm)
+      if (!amount || (row.pricing_type === 'fixed' && row.price_xlm && xlmStroops(amount) !== xlmStroops(row.price_xlm))) return res.status(400).json({ error: 'Set a valid XLM quote. Fixed-price listings must use the listed amount.' })
+      const changed=await query<{id:number}[]>(`UPDATE creator_service_requests SET status='accepted',agreed_amount_xlm=?,creator_note=?,updated_at=now() WHERE id=? AND status='requested' RETURNING id`,[amount,note,id])
+      if (!changed.length) return res.status(409).json({ error: 'This request has already changed.' })
+    }
+  } else if (action === 'in_progress' || action === 'shipped' || action === 'delivered') {
+    if (!creator || !['paid','in_progress'].includes(row.status) || action === 'shipped') return res.status(403).json({ error: 'This service status update is not available for this request.' })
+    const allowed=action==='in_progress' ? ['paid'] : ['paid','in_progress']
+    const changed=await query<{id:number}[]>(`UPDATE creator_service_requests SET status=?,creator_note=?,updated_at=now() WHERE id=? AND status=ANY(?) RETURNING id`,[action,note,id,allowed])
+    if (!changed.length) return res.status(409).json({ error: 'This request has already changed.' })
+  } else {
+    if (!buyer || row.status !== 'delivered') return res.status(403).json({ error: 'Only the buyer can complete a delivered order.' })
+    const changed=await query<{id:number}[]>(`UPDATE creator_service_requests SET status='completed',updated_at=now() WHERE id=? AND status='delivered' RETURNING id`,[id])
+    if (!changed.length) return res.status(409).json({ error: 'This request has already changed.' })
+  }
+  const recipient = creator ? row.buyer_wallet : row.creator_wallet
+  await query(`INSERT INTO notifications (wallet_address,kind,title,body,action_url) VALUES (?,?,?,?,?)`, [recipient, 'service_request_update', 'Creator request updated', 'A creator service request has a new status.', '/services'])
+  res.json({ ok: true })
+})
+
+app.post('/api/creator-service-requests/:id/payment', processRateLimit('creator-service-payment', 10, 10 * 60_000), requireWallet, async (req, res) => {
+  const wallet = res.locals.wallet as string
+  const id = Number(req.params.id)
+  const txHash = String(req.body?.transactionHash ?? '').trim().toLowerCase()
+  if (!Number.isSafeInteger(id) || id <= 0 || !/^[a-f0-9]{64}$/.test(txHash)) return res.status(400).json({ error: 'A valid Stellar transaction hash is required.' })
+  await ensureSchema()
+  const rows = await query<{ creator_wallet: string; buyer_wallet: string; status: string; amount: string; listing_id: number; category: string }[]>(`SELECT creator_wallet,buyer_wallet,status,agreed_amount_xlm::text AS amount,listing_id,category FROM creator_service_requests r JOIN creator_service_listings l ON l.id=r.listing_id WHERE r.id=?`, [id])
+  if (!rows.length || rows[0].buyer_wallet.toLowerCase() !== wallet.toLowerCase()) return res.status(404).json({ error: 'Accepted request not found.' })
+  const order = rows[0]
+  if (order.status !== 'accepted' || !order.amount) return res.status(409).json({ error: 'This request is not ready for payment.' })
+  const network = String(process.env.VITE_STELLAR_NETWORK ?? 'TESTNET').toUpperCase()
+  const horizon = network === 'PUBLIC' ? 'https://horizon.stellar.org' : 'https://horizon-testnet.stellar.org'
+  try {
+    const txResponse = await fetch(`${horizon}/transactions/${txHash}`, { signal: AbortSignal.timeout(10_000) })
+    if (!txResponse.ok) return res.status(409).json({ error: 'Payment is not confirmed on the configured Stellar network yet.' })
+    const tx = await txResponse.json() as { successful?: boolean; source_account?: string; memo_type?: string; memo?: string; ledger?: number }
+    if (tx.successful !== true || tx.source_account?.toLowerCase() !== wallet.toLowerCase() || tx.memo_type !== 'text' || tx.memo !== `SN order ${id}`) return res.status(400).json({ error: 'This transaction does not match this order payment.' })
+    const opResponse = await fetch(`${horizon}/transactions/${txHash}/operations?limit=10`, { signal: AbortSignal.timeout(10_000) })
+    if (!opResponse.ok) return res.status(503).json({ error: 'Could not verify the payment operation yet.' })
+    const opData = await opResponse.json() as { _embedded?: { records?: { type?: string; from?: string; to?: string; amount?: string; asset_type?: string; source_account?: string }[] } }
+    const operations = opData._embedded?.records ?? []
+    const payment = operations[0]
+    if (operations.length !== 1 || payment?.type !== 'payment' || payment.asset_type !== 'native' || payment.to?.toLowerCase() !== order.creator_wallet.toLowerCase() || (payment.from ?? payment.source_account)?.toLowerCase() !== wallet.toLowerCase() || xlmStroops(payment.amount) === null || xlmStroops(payment.amount) !== xlmStroops(order.amount)) return res.status(400).json({ error: 'The confirmed payment must be the exact XLM amount for this creator and order.' })
+    await withTransaction(async () => {
+      const locked = await query<{ status: string }[]>(`SELECT status FROM creator_service_requests WHERE id=? FOR UPDATE`, [id])
+      if (!locked.length || locked[0].status !== 'accepted') throw new Error('This order has already been paid or changed.')
+      await query(`UPDATE creator_service_requests SET status='paid',transaction_hash=?,updated_at=now() WHERE id=?`, [txHash, id])
+      await query(`INSERT INTO creator_commerce_payments (transaction_hash,payer_wallet,payee_wallet,order_kind,order_id,amount_xlm) VALUES (?,?,?,?,?,?)`, [txHash,wallet,order.creator_wallet,'service',id,order.amount])
+      await query(`INSERT INTO notifications (wallet_address,kind,title,body,action_url) VALUES (?,?,?,?,?)`, [order.creator_wallet, 'service_payment', 'XLM payment received', `${order.amount} XLM was paid for your creator listing.`, '/services'])
+    })
+    res.status(201).json({ ok: true, transactionHash: txHash })
+  } catch (error) { res.status(409).json({ error: error instanceof Error ? error.message : 'Could not verify this payment.' }) }
+})
+
+app.get('/api/physical-art', async (_req, res) => {
+  try {
+    await ensureSchema()
+    const items = await query<Record<string, unknown>[]>(`SELECT l.id,l.creator_wallet,COALESCE(p.creator_username,NULLIF(p.display_name,''),l.creator_wallet) AS creator_name,l.title,l.description,l.image_url,l.price_xlm::text AS price_xlm,l.dimensions,l.medium,l.delivery_details,l.status,l.created_at FROM physical_art_listings l LEFT JOIN user_profiles p ON LOWER(p.wallet_address)=LOWER(l.creator_wallet) WHERE l.status IN ('published','sold') ORDER BY l.created_at DESC LIMIT 100`)
+    res.json({ items })
+  } catch (error) { res.status(503).json({ error: error instanceof Error ? error.message : 'Could not load original physical artworks' }) }
+})
+app.get('/api/physical-art/mine', requireWallet, async (_req,res) => {
+  const wallet=res.locals.wallet as string
+  await ensureSchema()
+  const items=await query<Record<string,unknown>[]>(`SELECT l.id,l.creator_wallet,COALESCE(p.creator_username,NULLIF(p.display_name,''),l.creator_wallet) AS creator_name,l.title,l.description,l.image_url,l.price_xlm::text AS price_xlm,l.dimensions,l.medium,l.delivery_details,l.status,l.created_at FROM physical_art_listings l LEFT JOIN user_profiles p ON LOWER(p.wallet_address)=LOWER(l.creator_wallet) WHERE LOWER(l.creator_wallet)=LOWER(?) ORDER BY l.created_at DESC LIMIT 100`,[wallet])
+  res.json({items})
+})
+
+app.post('/api/physical-art', processRateLimit('physical-art-create', 6, 10 * 60_000), requireWallet, async (req, res) => {
+  const wallet = res.locals.wallet as string
+  const input = req.body ?? {}
+  const title = String(input.title ?? '').trim(), description = String(input.description ?? '').trim(), imageUrl = safePublicUrl(input.imageUrl), price = validXlmAmount(input.priceXlm)
+  if (title.length < 3 || title.length > 160 || description.length < 30 || description.length > 4000 || !price || !imageUrl) return res.status(400).json({ error: 'Add a title, a 30–4,000 character description, artwork image URL, and fixed XLM price.' })
+  await ensureSchema()
+  const inserted = await query<{ id: number }[]>(`INSERT INTO physical_art_listings (creator_wallet,title,description,image_url,price_xlm,dimensions,medium,delivery_details) VALUES (?,?,?,?,?,?,?,?) RETURNING id`, [wallet,title,description,imageUrl,price,String(input.dimensions ?? '').slice(0,120),String(input.medium ?? '').slice(0,120),String(input.deliveryDetails ?? '').trim().slice(0,1000)])
+  res.status(201).json({ id: inserted[0]?.id })
+})
+
+app.patch('/api/physical-art/:id', processRateLimit('physical-art-update', 20, 10 * 60_000), requireWallet, async (req, res) => {
+  const wallet = res.locals.wallet as string, id = Number(req.params.id), status = String(req.body?.status ?? '')
+  if (!Number.isSafeInteger(id) || id <= 0 || !['published','paused'].includes(status)) return res.status(400).json({ error: 'Invalid physical artwork update' })
+  const updated = await query<{ id: number }[]>(`UPDATE physical_art_listings SET status=?,updated_at=now() WHERE id=? AND LOWER(creator_wallet)=LOWER(?) AND status <> 'sold' RETURNING id`, [status,id,wallet])
+  if (!updated.length) return res.status(404).json({ error: 'Artwork not found or already sold' })
+  res.json({ ok: true })
+})
+
+app.get('/api/physical-art/orders', requireWallet, async (_req, res) => {
+  const wallet = res.locals.wallet as string
+  await ensureSchema()
+  const items = await query<Record<string, unknown>[]>(`SELECT o.id,o.listing_id,o.buyer_wallet,o.seller_wallet,o.delivery_address,o.status,o.transaction_hash,o.tracking_note,o.created_at,l.title,l.price_xlm::text AS price_xlm,l.image_url FROM physical_art_orders o JOIN physical_art_listings l ON l.id=o.listing_id WHERE LOWER(o.buyer_wallet)=LOWER(?) OR LOWER(o.seller_wallet)=LOWER(?) ORDER BY o.created_at DESC LIMIT 100`, [wallet,wallet])
+  res.json({ items })
+})
+
+app.post('/api/physical-art/:id/orders', processRateLimit('physical-art-order', 10, 10 * 60_000), requireWallet, async (req, res) => {
+  const wallet = res.locals.wallet as string, id = Number(req.params.id), deliveryAddress = String(req.body?.deliveryAddress ?? '').trim()
+  if (!Number.isSafeInteger(id) || id <= 0 || deliveryAddress.length < 8 || deliveryAddress.length > 1500) return res.status(400).json({ error: 'Enter the delivery address for this physical artwork.' })
+  await ensureSchema()
+  const listing = await query<{ creator_wallet: string; status: string }[]>(`SELECT creator_wallet,status FROM physical_art_listings WHERE id=?`, [id])
+  if (!listing.length || listing[0].status !== 'published') return res.status(409).json({ error: 'This physical artwork is no longer available.' })
+  if (listing[0].creator_wallet.toLowerCase() === wallet.toLowerCase()) return res.status(400).json({ error: 'You cannot buy your own artwork.' })
+  const result = await withTransaction(async () => {
+    const locked = await query<{status:string}[]>(`SELECT status FROM physical_art_listings WHERE id=? FOR UPDATE`,[id])
+    if (!locked.length || locked[0].status !== 'published') throw new Error('This physical artwork is no longer available.')
+    const pending = await query<{id:number}[]>(`SELECT id FROM physical_art_orders WHERE listing_id=? AND status='pending' LIMIT 1`,[id])
+    if (pending.length) throw new Error('Another buyer has an unpaid order. Ask them to complete or cancel it before ordering.')
+    return query<{ id: number }[]>(`INSERT INTO physical_art_orders (listing_id,buyer_wallet,seller_wallet,delivery_address) VALUES (?,?,?,?) RETURNING id`, [id,wallet,listing[0].creator_wallet,deliveryAddress])
+  })
+  await query(`INSERT INTO notifications (wallet_address,kind,title,body,action_url) VALUES (?,?,?,?,?)`, [listing[0].creator_wallet,'physical_art_order','Physical artwork order requested','A buyer wants to purchase your original artwork. Review the order.','/physical-art'])
+  res.status(201).json({ id: result[0]?.id })
+})
+
+app.post('/api/physical-art/orders/:id/payment', processRateLimit('physical-art-payment', 10, 10 * 60_000), requireWallet, async (req, res) => {
+  const wallet = res.locals.wallet as string, id = Number(req.params.id), txHash = String(req.body?.transactionHash ?? '').trim().toLowerCase()
+  if (!Number.isSafeInteger(id) || id <= 0 || !/^[a-f0-9]{64}$/.test(txHash)) return res.status(400).json({ error: 'A valid Stellar transaction hash is required.' })
+  await ensureSchema()
+  const rows = await query<{ buyer_wallet: string; seller_wallet: string; status: string; listing_id: number; price: string }[]>(`SELECT o.buyer_wallet,o.seller_wallet,o.status,o.listing_id,l.price_xlm::text AS price FROM physical_art_orders o JOIN physical_art_listings l ON l.id=o.listing_id WHERE o.id=?`, [id])
+  if (!rows.length || rows[0].buyer_wallet.toLowerCase() !== wallet.toLowerCase()) return res.status(404).json({ error: 'Physical art order not found.' })
+  const order = rows[0]
+  if (order.status !== 'pending') return res.status(409).json({ error: 'This order is no longer awaiting payment.' })
+  const network = String(process.env.VITE_STELLAR_NETWORK ?? 'TESTNET').toUpperCase(), horizon = network === 'PUBLIC' ? 'https://horizon.stellar.org' : 'https://horizon-testnet.stellar.org'
+  try {
+    const txResponse = await fetch(`${horizon}/transactions/${txHash}`, { signal: AbortSignal.timeout(10_000) })
+    if (!txResponse.ok) return res.status(409).json({ error: 'Payment is not confirmed on the configured Stellar network yet.' })
+    const tx = await txResponse.json() as { successful?: boolean; source_account?: string; memo_type?: string; memo?: string }
+    if (!tx.successful || tx.source_account?.toLowerCase() !== wallet.toLowerCase() || tx.memo_type !== 'text' || tx.memo !== `SN order ${id}`) return res.status(400).json({ error: 'This transaction does not match this physical artwork order.' })
+    const opResponse = await fetch(`${horizon}/transactions/${txHash}/operations?limit=10`, { signal: AbortSignal.timeout(10_000) })
+    if (!opResponse.ok) return res.status(503).json({ error: 'Could not verify the payment operation yet.' })
+    const opData = await opResponse.json() as { _embedded?: { records?: { type?: string; from?: string; to?: string; amount?: string; asset_type?: string; source_account?: string }[] } }
+    const operations = opData._embedded?.records ?? [], payment = operations[0]
+    if (operations.length !== 1 || payment?.type !== 'payment' || payment.asset_type !== 'native' || payment.to?.toLowerCase() !== order.seller_wallet.toLowerCase() || (payment.from ?? payment.source_account)?.toLowerCase() !== wallet.toLowerCase() || xlmStroops(payment.amount) === null || xlmStroops(payment.amount) !== xlmStroops(order.price)) return res.status(400).json({ error: 'The confirmed payment must be the exact XLM price sent to this artist.' })
+    await withTransaction(async () => {
+      const locked = await query<{ status: string }[]>(`SELECT status FROM physical_art_orders WHERE id=? FOR UPDATE`, [id])
+      const item = await query<{ status: string }[]>(`SELECT status FROM physical_art_listings WHERE id=? FOR UPDATE`, [order.listing_id])
+      if (!locked.length || locked[0].status !== 'pending' || !item.length || item[0].status !== 'published') throw new Error('This artwork was already reserved or sold.')
+      await query(`UPDATE physical_art_orders SET status='paid',transaction_hash=?,updated_at=now() WHERE id=?`, [txHash,id])
+      await query(`UPDATE physical_art_listings SET status='sold',updated_at=now() WHERE id=?`, [order.listing_id])
+      await query(`INSERT INTO creator_commerce_payments (transaction_hash,payer_wallet,payee_wallet,order_kind,order_id,amount_xlm) VALUES (?,?,?,?,?,?)`, [txHash,wallet,order.seller_wallet,'physical_art',id,order.price])
+      await query(`INSERT INTO notifications (wallet_address,kind,title,body,action_url) VALUES (?,?,?,?,?)`, [order.seller_wallet,'physical_art_payment','Physical artwork paid','The buyer paid the listed XLM price. Arrange delivery and update the order.','/physical-art'])
+    })
+    res.status(201).json({ ok: true, transactionHash: txHash })
+  } catch (error) { res.status(409).json({ error: error instanceof Error ? error.message : 'Could not verify this payment.' }) }
+})
+
+app.patch('/api/physical-art/orders/:id', processRateLimit('physical-art-order-update', 20, 10 * 60_000), requireWallet, async (req, res) => {
+  const wallet = res.locals.wallet as string, id = Number(req.params.id), action = String(req.body?.action ?? '')
+  if (!Number.isSafeInteger(id) || id <= 0 || !['shipped','delivered','complete','cancel'].includes(action)) return res.status(400).json({ error: 'Invalid order update' })
+  const rows = await query<{ buyer_wallet: string; seller_wallet: string; status: string }[]>(`SELECT buyer_wallet,seller_wallet,status FROM physical_art_orders WHERE id=?`, [id])
+  if (!rows.length) return res.status(404).json({ error: 'Order not found' })
+  const order = rows[0], seller = order.seller_wallet.toLowerCase() === wallet.toLowerCase(), buyer = order.buyer_wallet.toLowerCase() === wallet.toLowerCase()
+  let changed: {id:number}[] = []
+  if (action === 'cancel' && buyer && order.status === 'pending') changed=await query<{id:number}[]>(`UPDATE physical_art_orders SET status='cancelled',updated_at=now() WHERE id=? AND status='pending' RETURNING id`, [id])
+  else if (seller && ['shipped','delivered'].includes(action) && ['paid','shipped'].includes(order.status)) changed=await query<{id:number}[]>(`UPDATE physical_art_orders SET status=?,tracking_note=?,updated_at=now() WHERE id=? AND status IN ('paid','shipped') RETURNING id`, [action,String(req.body?.note ?? '').trim().slice(0,1000),id])
+  else if (buyer && action === 'complete' && order.status === 'delivered') changed=await query<{id:number}[]>(`UPDATE physical_art_orders SET status='completed',updated_at=now() WHERE id=? AND status='delivered' RETURNING id`, [id])
+  else return res.status(403).json({ error: 'This order action is not available to your account at its current status.' })
+  if (!changed.length) return res.status(409).json({ error: 'This order has already changed.' })
+  const recipient = seller ? order.buyer_wallet : order.seller_wallet
+  await query(`INSERT INTO notifications (wallet_address,kind,title,body,action_url) VALUES (?,?,?,?,?)`, [recipient,'physical_art_order_update','Physical artwork order updated','Your original artwork order has a new status.','/physical-art'])
+  res.json({ ok: true })
+})
+
+app.get('/api/exhibitions', async (req, res) => {
+  try {
+    await ensureSchema()
+    const scope = String(req.query.scope ?? 'upcoming')
+    const items = await query<Record<string, unknown>[]>(`SELECT e.*, COALESCE(a.creator_username,NULLIF(a.display_name,''),e.organizer_wallet) AS organizer_name FROM creator_exhibitions e LEFT JOIN user_profiles a ON LOWER(a.wallet_address)=LOWER(e.organizer_wallet) WHERE e.status='published' AND (? <> 'upcoming' OR e.ends_at >= now()) AND (? <> 'past' OR e.ends_at < now()) ORDER BY CASE WHEN e.starts_at >= now() THEN 0 ELSE 1 END,e.starts_at ASC LIMIT 100`, [scope, scope])
+    res.json({ items })
+  } catch (error) { res.status(503).json({ error: error instanceof Error ? error.message : 'Could not load exhibitions' }) }
+})
+
+app.post('/api/exhibitions', processRateLimit('exhibition-create', 8, 10 * 60_000), requireWallet, async (req, res) => {
+  const wallet = res.locals.wallet as string
+  const input = req.body ?? {}
+  const title = String(input.title ?? '').trim(), description = String(input.description ?? '').trim(), venue = String(input.venue ?? '').trim(), address = String(input.streetAddress ?? '').trim(), city = String(input.city ?? '').trim(), country = String(input.country ?? '').trim()
+  const start = new Date(input.startsAt), end = new Date(input.endsAt)
+  if (title.length < 3 || title.length > 160 || description.length < 30 || description.length > 4000 || !venue || !address || !city || !country || !Number.isFinite(start.getTime()) || !Number.isFinite(end.getTime()) || end <= start) return res.status(400).json({ error: 'Add the event title, detailed description, full venue address, and valid start/end dates.' })
+  const url = (value: unknown) => { const raw = String(value ?? '').trim(); if (!raw) return null; try { const parsed = new URL(raw); return ['http:', 'https:'].includes(parsed.protocol) ? raw.slice(0, 2048) : null } catch { return null } }
+  const website = url(input.websiteUrl), tickets = url(input.ticketUrl), imageUrl = safePublicUrl(input.imageUrl)
+  if ((input.websiteUrl && !website) || (input.ticketUrl && !tickets)) return res.status(400).json({ error: 'Website and ticket links must be valid http or https URLs.' })
+  if (input.imageUrl && !imageUrl) return res.status(400).json({ error: 'Exhibition image must use a valid http or https URL.' })
+  await ensureSchema()
+  const inserted = await query<{ id: number }[]>(`INSERT INTO creator_exhibitions (organizer_wallet,title,description,venue,street_address,city,region,country,starts_at,ends_at,website_url,ticket_url,image_url) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?) RETURNING id`, [wallet,title,description,venue,address,city,String(input.region ?? '').slice(0,120),country,start.toISOString(),end.toISOString(),website,tickets,imageUrl])
+  res.status(201).json({ id: inserted[0]?.id })
+})
+
+app.patch('/api/exhibitions/:id', processRateLimit('exhibition-update', 20, 10 * 60_000), requireWallet, async (req, res) => {
+  const wallet = res.locals.wallet as string
+  const id = Number(req.params.id)
+  const status = String(req.body?.status ?? '')
+  if (!Number.isSafeInteger(id) || id <= 0 || !['published','cancelled'].includes(status)) return res.status(400).json({ error: 'Invalid exhibition update' })
+  const updated = await query<{ id: number }[]>(`UPDATE creator_exhibitions SET status=?,updated_at=now() WHERE id=? AND LOWER(organizer_wallet)=LOWER(?) RETURNING id`, [status,id,wallet])
+  if (!updated.length) return res.status(404).json({ error: 'Exhibition not found' })
+  res.json({ ok: true })
+})
 
 app.get('/api/creator/archive', requireWallet, async (_req, res) => {
   const wallet = res.locals.wallet as string
@@ -527,7 +1010,11 @@ app.post('/api/creator/archive', requireWallet, async (req, res) => {
 })
 
 async function notifyOfferWallet(wallet: string, kind: string, title: string, body: string, emailSubject: string, actionUrl?: string) {
-  await query('INSERT INTO notifications (wallet_address, kind, title, body) VALUES (?, ?, ?, ?)', [wallet, kind, title, body])
+  let notificationPath = '/account'
+  if (actionUrl) {
+    try { notificationPath = new URL(actionUrl).pathname } catch { /* Keep the safe account destination. */ }
+  }
+  await notifyUser(wallet, kind, title, body, notificationPath)
   if (!mailConfigured()) return
   const profile = await query<{ email: string | null }[]>('SELECT email FROM user_profiles WHERE LOWER(wallet_address) = LOWER(?) LIMIT 1', [wallet])
   const email = profile[0]?.email?.trim()
@@ -697,7 +1184,7 @@ app.get('/api/admin/ops/health', requireAdmin, async (_req, res) => {
 app.get('/api/cron/ops-monitor', async (req, res) => {
   res.setHeader('Cache-Control', 'no-store')
   const secret = process.env.CRON_SECRET
-  if (!secret || req.header('authorization') !== `Bearer ${secret}`) return res.status(401).json({ error: 'Cron authorization required' })
+  if (!secret || !constantTimeStringEqual(`Bearer ${secret}`, req.header('authorization') ?? '')) return res.status(401).json({ error: 'Cron authorization required' })
   try {
     await ensureSchema()
     await runIndexerOnce()
@@ -723,6 +1210,21 @@ app.get('/api/cron/ops-monitor', async (req, res) => {
   } catch {
     await deliverOpsAlert('degraded', 'Scheduled operations monitor failed while querying readiness state.')
     return res.status(503).json({ status: 'degraded' })
+  }
+})
+
+app.get('/api/cron/marketplace-maintenance', async (req, res) => {
+  res.setHeader('Cache-Control', 'no-store')
+  const secret = process.env.CRON_SECRET
+  if (!secret || !constantTimeStringEqual(`Bearer ${secret}`, req.header('authorization') ?? '')) {
+    return res.status(401).json({ error: 'Cron authorization required' })
+  }
+  try {
+    const result = await runMarketplaceKeeper()
+    return res.json({ status: result.failed ? 'partial' : 'complete', ...result })
+  } catch (error) {
+    console.error('Scheduled marketplace maintenance failed', error)
+    return res.status(503).json({ error: error instanceof Error ? error.message : 'Marketplace maintenance is unavailable' })
   }
 })
 
@@ -810,12 +1312,16 @@ app.get('/api/marketplace/status', async (_req, res) => {
   try {
     if (isVercel) await runIndexerOnce()
     await ensureSchema()
-    const [listings, offers, owners] = await Promise.all([
-      query('SELECT * FROM marketplace_listings WHERE active = TRUE AND expires_at > 0 ORDER BY updated_at DESC LIMIT 100'),
-      query('SELECT * FROM marketplace_offers WHERE contract_id = ? AND active = TRUE AND expires_at > EXTRACT(EPOCH FROM NOW())::BIGINT ORDER BY updated_at DESC LIMIT 100', [process.env.STELLAR_MARKETPLACE_CONTRACT_ID ?? process.env.VITE_STELLAR_MARKETPLACE_CONTRACT_ID ?? '']),
+    const marketplaceContractId = process.env.STELLAR_MARKETPLACE_CONTRACT_ID ?? process.env.VITE_STELLAR_MARKETPLACE_CONTRACT_ID ?? ''
+    const [listings, offers, collectionOffers, traitOffers, owners, auctions] = await Promise.all([
+      query('SELECT * FROM marketplace_listings WHERE contract_id = ? AND active = TRUE AND expires_at > 0 ORDER BY updated_at DESC LIMIT 100', [marketplaceContractId]),
+      query('SELECT * FROM marketplace_offers WHERE contract_id = ? AND active = TRUE ORDER BY updated_at DESC LIMIT 100', [marketplaceContractId]),
+      query('SELECT * FROM marketplace_collection_offers WHERE contract_id = ? AND active = TRUE ORDER BY updated_at DESC LIMIT 100', [marketplaceContractId]),
+      query('SELECT * FROM marketplace_trait_offers WHERE contract_id = ? AND active = TRUE ORDER BY updated_at DESC LIMIT 100', [marketplaceContractId]),
       query('SELECT * FROM nft_ownership ORDER BY updated_at DESC LIMIT 500'),
+      query('SELECT * FROM marketplace_auctions WHERE contract_id = ? AND active = TRUE ORDER BY updated_at DESC LIMIT 100', [marketplaceContractId]),
     ])
-    res.json({ database: true, indexed: true, listings, offers, owners })
+    res.json({ database: true, indexed: true, listings, offers, collectionOffers, traitOffers, owners, auctions })
   } catch (error) {
     res.status(503).json({ database: true, indexed: false, error: error instanceof Error ? error.message : 'Marketplace read model unavailable' })
   }
@@ -844,7 +1350,7 @@ app.get('/api/social/state', requireWallet, async (_req, res) => {
     query<{ nft_id: string }[]>('SELECT nft_id FROM nft_likes WHERE wallet_address = ?', [wallet]),
     query<{ nft_id: string }[]>('SELECT nft_id FROM nft_dislikes WHERE wallet_address = ?', [wallet]),
     query<{ id: number; nft_id: string; wallet_address: string; body: string; parent_id: number | null; created_at: Date }[]>('SELECT id, nft_id, wallet_address, body, parent_id, created_at FROM nft_comments ORDER BY created_at ASC LIMIT 1000'),
-    query<{ id: number; kind: string; title: string; body: string; read_at: string | null; created_at: string }[]>('SELECT id, kind, title, body, read_at, created_at FROM notifications WHERE wallet_address = ? ORDER BY created_at DESC LIMIT 50', [wallet]),
+    query<{ id: number; kind: string; title: string; body: string; action_url: string; read_at: string | null; created_at: string }[]>('SELECT id, kind, title, body, action_url, read_at, created_at FROM notifications WHERE wallet_address = ? ORDER BY created_at DESC LIMIT 50', [wallet]),
     query<{ count: number }[]>('SELECT COUNT(*) AS count FROM notifications WHERE wallet_address = ? AND read_at IS NULL', [wallet]),
     query<{ creator_id: string }[]>('SELECT creator_id FROM creator_follows WHERE wallet_address = ?', [wallet]),
     query<{ post_id: number }[]>('SELECT post_id FROM post_likes WHERE wallet_address = ?', [wallet]),
@@ -871,12 +1377,102 @@ app.get('/api/notifications', requireWallet, async (_req, res) => {
   const wallet = res.locals.wallet as string
   try {
     const [items, unread] = await Promise.all([
-      query<{ id: number; kind: string; title: string; body: string; read_at: string | null; created_at: string }[]>('SELECT id, kind, title, body, read_at, created_at FROM notifications WHERE wallet_address = ? ORDER BY created_at DESC LIMIT 50', [wallet]),
+      query<{ id: number; kind: string; title: string; body: string; action_url: string; read_at: string | null; created_at: string }[]>('SELECT id, kind, title, body, action_url, read_at, created_at FROM notifications WHERE wallet_address = ? ORDER BY created_at DESC LIMIT 50', [wallet]),
       query<{ count: number }[]>('SELECT COUNT(*)::int AS count FROM notifications WHERE wallet_address = ? AND read_at IS NULL', [wallet]),
     ])
     res.json({ notifications: items, unreadCount: Number(unread[0]?.count ?? 0) })
   } catch (error) {
     res.status(503).json({ error: error instanceof Error ? error.message : 'Could not load notifications' })
+  }
+})
+
+app.get('/api/push/config', (_req, res) => {
+  res.setHeader('Cache-Control', 'public, max-age=300')
+  res.json(browserPushConfig())
+})
+
+app.post('/api/push/subscription', processRateLimit('browser-push-subscribe', 12, 10 * 60_000), requireWallet, async (req, res) => {
+  const wallet = res.locals.wallet as string
+  const subscription = req.body?.subscription ?? req.body
+  const endpoint = typeof subscription?.endpoint === 'string' ? subscription.endpoint.trim() : ''
+  const p256dh = typeof subscription?.keys?.p256dh === 'string' ? subscription.keys.p256dh : ''
+  const auth = typeof subscription?.keys?.auth === 'string' ? subscription.keys.auth : ''
+  try {
+    const endpointUrl = new URL(endpoint)
+    const host = endpointUrl.hostname.toLowerCase()
+    const trustedPushHost = host === 'fcm.googleapis.com'
+      || host === 'updates.push.services.mozilla.com'
+      || host.endsWith('.push.services.mozilla.com')
+      || host === 'notify.windows.com'
+      || host.endsWith('.notify.windows.com')
+    if (endpointUrl.protocol !== 'https:' || !trustedPushHost || endpoint.length > 2048 || !/^[A-Za-z0-9_-]{16,256}$/.test(p256dh) || !/^[A-Za-z0-9_-]{16,256}$/.test(auth)) {
+      return res.status(400).json({ error: 'A valid browser push subscription is required' })
+    }
+  } catch {
+    return res.status(400).json({ error: 'A valid browser push subscription is required' })
+  }
+  if (!browserPushConfig().enabled) return res.status(503).json({ error: 'Browser alerts are not configured yet' })
+  try {
+    await ensureSchema()
+    await query(
+      `INSERT INTO browser_push_subscriptions (endpoint, wallet_address, p256dh, auth) VALUES (?, ?, ?, ?)
+       ON CONFLICT (endpoint) DO UPDATE SET wallet_address=EXCLUDED.wallet_address, p256dh=EXCLUDED.p256dh, auth=EXCLUDED.auth, updated_at=now()`,
+      [endpoint, wallet, p256dh, auth],
+    )
+    res.status(201).json({ subscribed: true })
+  } catch (error) {
+    res.status(503).json({ error: error instanceof Error ? error.message : 'Could not save browser alerts' })
+  }
+})
+
+app.delete('/api/push/subscription', processRateLimit('browser-push-unsubscribe', 12, 10 * 60_000), requireWallet, async (req, res) => {
+  const wallet = res.locals.wallet as string
+  const endpoint = typeof req.body?.endpoint === 'string' ? req.body.endpoint.trim() : ''
+  if (!endpoint || endpoint.length > 2048) return res.status(400).json({ error: 'A valid browser push endpoint is required' })
+  try {
+    await ensureSchema()
+    const removed = await query(
+      'DELETE FROM browser_push_subscriptions WHERE endpoint = ? AND LOWER(wallet_address) = LOWER(?) RETURNING endpoint',
+      [endpoint, wallet],
+    )
+    res.json({ unsubscribed: true, removed: removed.length > 0 })
+  } catch (error) {
+    res.status(503).json({ error: error instanceof Error ? error.message : 'Could not disable browser alerts' })
+  }
+})
+
+app.post('/api/notifications/read-all', requireWallet, async (_req, res) => {
+  const wallet = res.locals.wallet as string
+  try {
+    await ensureSchema()
+    const updated = await query<{ id: number }[]>(
+      'UPDATE notifications SET read_at = CURRENT_TIMESTAMP WHERE LOWER(wallet_address) = LOWER(?) AND read_at IS NULL RETURNING id',
+      [wallet],
+    )
+    res.json({ read: true, updated: updated.length })
+  } catch (error) {
+    res.status(503).json({ error: error instanceof Error ? error.message : 'Could not mark notifications as read' })
+  }
+})
+
+app.get('/api/referrals/me', requireWallet, async (_req, res) => {
+  const wallet = res.locals.wallet as string
+  try {
+    await ensureSchema()
+    let rows = await query<{ code: string }[]>('SELECT code FROM referral_codes WHERE LOWER(wallet_address) = LOWER(?) LIMIT 1', [wallet])
+    for (let attempt = 0; !rows.length && attempt < 5; attempt += 1) {
+      const code = crypto.randomBytes(8).toString('hex').toUpperCase()
+      await query('INSERT INTO referral_codes (wallet_address, code) VALUES (?, ?) ON CONFLICT DO NOTHING', [wallet, code])
+      rows = await query<{ code: string }[]>('SELECT code FROM referral_codes WHERE LOWER(wallet_address) = LOWER(?) LIMIT 1', [wallet])
+    }
+    if (!rows.length) return res.status(503).json({ error: 'Could not create your invite link. Please retry.' })
+    const counts = await query<{ referrals: number; activated: number }[]>(
+      'SELECT COUNT(*)::int AS referrals, COUNT(*) FILTER (WHERE activated_at IS NOT NULL)::int AS activated FROM referrals WHERE LOWER(referrer_wallet) = LOWER(?)',
+      [wallet],
+    )
+    res.json({ code: rows[0].code, referrals: Number(counts[0]?.referrals ?? 0), activated: Number(counts[0]?.activated ?? 0) })
+  } catch (error) {
+    res.status(503).json({ error: error instanceof Error ? error.message : 'Could not load referral summary' })
   }
 })
 
@@ -1245,36 +1841,64 @@ app.get('/api/analytics/overview', async (_req, res) => {
     if (isVercel) await runIndexerOnce()
     await ensureSchema()
     const [summary, daily, topCollections] = await Promise.all([
-      query<{ collections: number; minted: number; holders: number; listings: number; sales: number; volume_xlm: string }[]>(
-        `WITH sales AS (
-           SELECT event_type,
+      query<{ collections: number; minted: number; holders: number; listings: number; sales: number; primary_volume_xlm: string; secondary_volume_xlm: string; volume_xlm: string }[]>(
+        `WITH sale_events AS (
+           SELECT DISTINCT ON (tx_hash, contract_id, payload->'value'->>4)
+                  tx_hash, contract_id, event_type,
                   CASE WHEN payload->'value'->>5 ~ '^[0-9]+$' THEN (payload->'value'->>5)::numeric / 10000000 ELSE 0 END AS amount_xlm
-           FROM marketplace_events WHERE event_type IN ('sale', 'offer_sale', 'auction_sale')
+           FROM marketplace_events
+           WHERE event_type IN ('sale', 'offer_s', 'offer_sale', 'auc_s', 'auction_sale')
+           ORDER BY tx_hash, contract_id, payload->'value'->>4,
+                    CASE event_type WHEN 'sale' THEN 0 WHEN 'offer_s' THEN 1 WHEN 'auc_s' THEN 2 ELSE 3 END
+         ), mint_volume AS (
+           SELECT COALESCE(SUM(paid_stroops), 0)::numeric / 10000000 AS amount_xlm
+           FROM stage_mint_events WHERE paid_stroops IS NOT NULL
+         ), trade_volume AS (
+           SELECT COALESCE(SUM(amount_xlm), 0) AS amount_xlm, COUNT(*)::int AS sales FROM sale_events
          )
          SELECT
            (SELECT COUNT(*)::int FROM collections WHERE contract_id IS NOT NULL) AS collections,
            (SELECT COUNT(*)::int FROM verified_nft_mints) AS minted,
            (SELECT COUNT(DISTINCT owner_address)::int FROM nft_ownership WHERE owner_address LIKE 'G%') AS holders,
            (SELECT COUNT(*)::int FROM marketplace_listings WHERE active = TRUE) AS listings,
-           (SELECT COUNT(*)::int FROM sales) AS sales,
-           COALESCE((SELECT SUM(amount_xlm) FROM sales), 0)::numeric(24,2)::text AS volume_xlm`,
+           (SELECT sales FROM trade_volume) AS sales,
+           (SELECT amount_xlm FROM mint_volume)::numeric(24,2)::text AS primary_volume_xlm,
+           (SELECT amount_xlm FROM trade_volume)::numeric(24,2)::text AS secondary_volume_xlm,
+           ((SELECT amount_xlm FROM mint_volume) + (SELECT amount_xlm FROM trade_volume))::numeric(24,2)::text AS volume_xlm`,
       ),
-      query<{ day: string; mints: number; volume_xlm: string }[]>(
+      query<{ day: string; mints: number; volume_xlm: string; primary_volume_xlm: string; secondary_volume_xlm: string }[]>(
         `WITH days AS (
            SELECT generate_series(current_date - interval '29 days', current_date, interval '1 day')::date AS day
          ), mint_days AS (
            SELECT created_at::date AS day, COUNT(*)::int AS mints FROM verified_nft_mints
            WHERE created_at >= current_date - interval '29 days' GROUP BY created_at::date
          ), sale_events AS (
-           SELECT created_at::date AS day,
+           SELECT DISTINCT ON (tx_hash, contract_id, payload->'value'->>4)
+                  created_at::date AS day, tx_hash, contract_id,
                   CASE WHEN payload->'value'->>5 ~ '^[0-9]+$' THEN (payload->'value'->>5)::numeric / 10000000 ELSE 0 END AS amount_xlm
-           FROM marketplace_events WHERE event_type IN ('sale', 'offer_sale', 'auction_sale') AND created_at >= current_date - interval '29 days'
+           FROM marketplace_events
+           WHERE event_type IN ('sale', 'offer_s', 'offer_sale', 'auc_s', 'auction_sale')
+             AND created_at >= current_date - interval '29 days'
+           ORDER BY tx_hash, contract_id, payload->'value'->>4,
+                    CASE event_type WHEN 'sale' THEN 0 WHEN 'offer_s' THEN 1 WHEN 'auc_s' THEN 2 ELSE 3 END
          ), sale_days AS (
-           SELECT day, SUM(amount_xlm)::numeric(24,2)::text AS volume_xlm FROM sale_events GROUP BY day
+           SELECT day, SUM(amount_xlm) AS volume_xlm FROM sale_events GROUP BY day
+         ), mint_days_volume AS (
+           SELECT e.created_at::date AS day, SUM(sm.paid_stroops)::numeric / 10000000 AS volume_xlm
+           FROM stage_mint_events sm
+           INNER JOIN marketplace_events e
+             ON e.contract_id = sm.contract_id AND e.tx_hash = sm.tx_hash
+             AND e.event_type = 'stage_mint'
+             AND e.payload->'topics'->>1 = sm.stage_id::text
+           WHERE sm.paid_stroops IS NOT NULL AND e.created_at >= current_date - interval '29 days'
+           GROUP BY e.created_at::date
          )
          SELECT to_char(days.day, 'YYYY-MM-DD') AS day, COALESCE(mint_days.mints, 0)::int AS mints,
-                COALESCE(sale_days.volume_xlm, '0') AS volume_xlm
-         FROM days LEFT JOIN mint_days USING (day) LEFT JOIN sale_days USING (day) ORDER BY days.day`,
+                COALESCE(mint_days_volume.volume_xlm, 0)::numeric(24,2)::text AS primary_volume_xlm,
+                COALESCE(sale_days.volume_xlm, 0)::numeric(24,2)::text AS secondary_volume_xlm,
+                (COALESCE(mint_days_volume.volume_xlm, 0) + COALESCE(sale_days.volume_xlm, 0))::numeric(24,2)::text AS volume_xlm
+         FROM days LEFT JOIN mint_days USING (day)
+         LEFT JOIN sale_days USING (day) LEFT JOIN mint_days_volume USING (day) ORDER BY days.day`,
       ),
       query<{ collection_id: string; name: string; cover: string; minted: number }[]>(
         `SELECT c.slug AS collection_id, c.name, c.cover, COUNT(v.token_id)::int AS minted
@@ -1285,7 +1909,7 @@ app.get('/api/analytics/overview', async (_req, res) => {
          GROUP BY c.slug, c.name, c.cover ORDER BY minted DESC, c.name ASC LIMIT 5`,
       ),
     ])
-    res.json({ generatedAt: new Date().toISOString(), network: 'Stellar Testnet', summary: summary[0] ?? { collections: 0, minted: 0, holders: 0, listings: 0, sales: 0, volume_xlm: '0' }, daily, topCollections })
+    res.json({ generatedAt: new Date().toISOString(), network: 'Stellar Testnet', summary: summary[0] ?? { collections: 0, minted: 0, holders: 0, listings: 0, sales: 0, primary_volume_xlm: '0', secondary_volume_xlm: '0', volume_xlm: '0' }, daily, topCollections })
   } catch (error) {
     res.status(503).json({ error: error instanceof Error ? error.message : 'Analytics are temporarily unavailable' })
   }
@@ -1309,17 +1933,18 @@ app.post('/api/marketplace/offers/:offerId/counter', requireWallet, async (req, 
   if (!Number.isSafeInteger(offerId) || offerId < 0) return res.status(400).json({ error: 'Invalid offer ID' })
   if (!counterAmount) return res.status(400).json({ error: 'Enter a counter amount greater than 0, with up to 7 decimal places' })
   await ensureSchema()
-  const marketplaceContractId = process.env.STELLAR_MARKETPLACE_CONTRACT_ID ?? process.env.VITE_STELLAR_MARKETPLACE_CONTRACT_ID ?? ''
+  const marketplaceContractId = String(req.body?.contractId ?? process.env.STELLAR_MARKETPLACE_CONTRACT_ID ?? process.env.VITE_STELLAR_MARKETPLACE_CONTRACT_ID ?? '')
+  if (marketplaceContractId !== (process.env.STELLAR_MARKETPLACE_CONTRACT_ID ?? process.env.VITE_STELLAR_MARKETPLACE_CONTRACT_ID ?? '')) return res.status(400).json({ error: 'Marketplace contract is not configured' })
   const offers = await query<{ buyer: string; nft_contract: string; token_id: number; active: boolean }[]>('SELECT buyer, nft_contract, token_id, active FROM marketplace_offers WHERE contract_id = ? AND offer_id = ?', [marketplaceContractId, offerId])
   if (!offers.length || !offers[0].active) return res.status(404).json({ error: 'This offer is no longer active' })
   const offer = offers[0]
   const owner = await query<{ owner_address: string }[]>('SELECT owner_address FROM nft_ownership WHERE contract_id = ? AND token_id = ?', [offer.nft_contract, offer.token_id])
   if (!owner.length || owner[0].owner_address.toLowerCase() !== seller.toLowerCase()) return res.status(403).json({ error: 'Only the current NFT owner can counter this offer' })
-  const prior = await query<{ status: string }[]>('SELECT status FROM marketplace_offer_responses WHERE offer_id = ?', [offerId])
+  const prior = await query<{ status: string }[]>('SELECT status FROM marketplace_offer_responses WHERE contract_id = ? AND offer_id = ?', [marketplaceContractId, offerId])
   if (prior[0]?.status === 'counter_accepted') return res.status(409).json({ error: 'This offer has already been closed' })
   const amountXlm = `${counterAmount.slice(0, -7) || '0'}.${counterAmount.slice(-7)}`.replace(/0+$/, '').replace(/\.$/, '')
-  await query(`INSERT INTO marketplace_offer_responses (offer_id, seller, buyer, status, counter_amount)
-    VALUES (?, ?, ?, 'countered', ?) ON CONFLICT (offer_id) DO UPDATE SET seller=EXCLUDED.seller, buyer=EXCLUDED.buyer, status='countered', counter_amount=EXCLUDED.counter_amount, updated_at=now()`, [offerId, seller, offer.buyer, counterAmount])
+  await query(`INSERT INTO marketplace_offer_responses (offer_id, contract_id, seller, buyer, status, counter_amount)
+    VALUES (?, ?, ?, ?, 'countered', ?) ON CONFLICT (contract_id, offer_id) DO UPDATE SET seller=EXCLUDED.seller, buyer=EXCLUDED.buyer, status='countered', counter_amount=EXCLUDED.counter_amount, updated_at=now()`, [offerId, marketplaceContractId, seller, offer.buyer, counterAmount])
   const nft = await marketplaceNftEmailContext(offer.nft_contract, offer.token_id)
   const note = `The seller countered your offer on “${nft.title}” at ${amountXlm} XLM. Accepting submits a replacement offer; the seller still needs to accept it.\n\nToken #${offer.token_id}`
   await notifyOfferWallet(offer.buyer, 'offer_counter', 'You received a counter-offer', note, `Counter-offer · ${nft.title}`, nft.url)
@@ -1333,19 +1958,20 @@ app.post('/api/marketplace/offers/:offerId/counter-response', requireWallet, asy
   if (!Number.isSafeInteger(offerId) || offerId < 0) return res.status(400).json({ error: 'Invalid offer ID' })
   if (action !== 'accept' && action !== 'reject') return res.status(400).json({ error: 'Choose accept or reject' })
   await ensureSchema()
-  const marketplaceContractId = process.env.STELLAR_MARKETPLACE_CONTRACT_ID ?? process.env.VITE_STELLAR_MARKETPLACE_CONTRACT_ID ?? ''
+  const marketplaceContractId = String(req.body?.contractId ?? process.env.STELLAR_MARKETPLACE_CONTRACT_ID ?? process.env.VITE_STELLAR_MARKETPLACE_CONTRACT_ID ?? '')
+  if (marketplaceContractId !== (process.env.STELLAR_MARKETPLACE_CONTRACT_ID ?? process.env.VITE_STELLAR_MARKETPLACE_CONTRACT_ID ?? '')) return res.status(400).json({ error: 'Marketplace contract is not configured' })
   const rows = await query<{ seller: string; buyer: string; status: string; counter_amount: string | null; token_id: number; nft_contract: string }[]>(
-    `SELECT r.seller, r.buyer, r.status, r.counter_amount, o.token_id, o.nft_contract FROM marketplace_offer_responses r JOIN marketplace_offers o ON o.offer_id = r.offer_id WHERE o.contract_id = ? AND r.offer_id = ?`, [marketplaceContractId, offerId],
+    `SELECT r.seller, r.buyer, r.status, r.counter_amount, o.token_id, o.nft_contract FROM marketplace_offer_responses r JOIN marketplace_offers o ON o.contract_id = r.contract_id AND o.offer_id = r.offer_id WHERE o.contract_id = ? AND r.offer_id = ?`, [marketplaceContractId, offerId],
   )
   if (!rows.length || rows[0].buyer.toLowerCase() !== buyer.toLowerCase()) return res.status(404).json({ error: 'Counter-offer not found for this wallet' })
   if (rows[0].status !== 'countered') return res.status(409).json({ error: 'This counter-offer is no longer open' })
   const nft = await marketplaceNftEmailContext(rows[0].nft_contract, rows[0].token_id)
   if (action === 'accept') {
     const note = `The buyer accepted your counter for “${nft.title}” and is submitting a replacement offer. You will need to accept that on-chain offer to complete the sale.\n\nToken #${rows[0].token_id}`
-    await query("UPDATE marketplace_offer_responses SET status = 'counter_accepted', updated_at = now() WHERE offer_id = ?", [offerId])
+    await query("UPDATE marketplace_offer_responses SET status = 'counter_accepted', updated_at = now() WHERE contract_id = ? AND offer_id = ?", [marketplaceContractId, offerId])
     await notifyOfferWallet(rows[0].seller, 'counter_accepted', 'Your counter-offer was accepted', note, `Counter accepted · ${nft.title}`, nft.url)
   } else {
-    await query("UPDATE marketplace_offer_responses SET status = 'counter_rejected', updated_at = now() WHERE offer_id = ?", [offerId])
+    await query("UPDATE marketplace_offer_responses SET status = 'counter_rejected', updated_at = now() WHERE contract_id = ? AND offer_id = ?", [marketplaceContractId, offerId])
     await notifyOfferWallet(rows[0].seller, 'counter_rejected', 'Your counter-offer was declined', `The buyer declined your counter for “${nft.title}”.\n\nToken #${rows[0].token_id}`, `Counter declined · ${nft.title}`, nft.url)
   }
   res.json({ status: action === 'accept' ? 'counter_accepted' : 'counter_rejected', seller: rows[0].seller, counterAmount: rows[0].counter_amount })
@@ -1366,11 +1992,11 @@ app.get('/api/marketplace/state/:wallet', async (req, res) => {
     const marketplaceContractId = process.env.STELLAR_MARKETPLACE_CONTRACT_ID ?? process.env.VITE_STELLAR_MARKETPLACE_CONTRACT_ID ?? ''
     const [myListings, myOffers, incomingOffers, seenTokens] = await Promise.all([
       // Listings the wallet currently has live (as seller → can cancel)
-      query('SELECT listing_id, nft_contract, token_id, price, expires_at, ledger FROM marketplace_listings WHERE seller = ? AND active = TRUE AND expires_at > 0 ORDER BY updated_at DESC LIMIT 100', [wallet]),
+      query('SELECT listing_id, contract_id, nft_contract, token_id, price, expires_at, ledger FROM marketplace_listings WHERE contract_id = ? AND seller = ? AND active = TRUE AND expires_at > 0 ORDER BY updated_at DESC LIMIT 100', [marketplaceContractId, wallet]),
       // Offers the wallet has made and can cancel (as buyer)
       query(`SELECT o.offer_id, o.contract_id, o.nft_contract, o.token_id, o.amount, o.expires_at::double precision AS expires_at, o.ledger, r.status AS response_status, r.counter_amount
-             FROM marketplace_offers o LEFT JOIN marketplace_offer_responses r ON r.offer_id = o.offer_id
-             WHERE o.contract_id = ? AND o.buyer = ? AND o.active = TRUE AND o.expires_at > EXTRACT(EPOCH FROM NOW())::BIGINT
+             FROM marketplace_offers o LEFT JOIN marketplace_offer_responses r ON r.contract_id = o.contract_id AND r.offer_id = o.offer_id
+             WHERE o.contract_id = ? AND o.buyer = ? AND o.active = TRUE
              ORDER BY o.updated_at DESC LIMIT 100`, [marketplaceContractId, wallet]),
       // Offers others made on tokens this wallet owns → can accept
       query(`SELECT o.offer_id, o.contract_id, o.nft_contract, o.token_id, o.buyer, o.amount, o.expires_at::double precision AS expires_at, o.ledger, r.status AS response_status, r.counter_amount,
@@ -1379,8 +2005,8 @@ app.get('/api/marketplace/state/:wallet', async (req, res) => {
              JOIN nft_ownership n ON n.contract_id = o.nft_contract AND n.token_id = o.token_id
              LEFT JOIN nft_mints m ON LOWER(m.contract_id) = LOWER(o.nft_contract) AND m.token_id = o.token_id
              LEFT JOIN creator_nft_metadata meta ON meta.metadata_uri = m.metadata_uri
-             LEFT JOIN marketplace_offer_responses r ON r.offer_id = o.offer_id
-             WHERE o.contract_id = ? AND n.owner_address = ? AND o.buyer <> ? AND o.active = TRUE AND o.expires_at > EXTRACT(EPOCH FROM NOW())::BIGINT
+             LEFT JOIN marketplace_offer_responses r ON r.contract_id = o.contract_id AND r.offer_id = o.offer_id
+             WHERE o.contract_id = ? AND n.owner_address = ? AND o.buyer <> ? AND o.active = TRUE
              ORDER BY o.updated_at DESC LIMIT 100`, [marketplaceContractId, wallet, wallet]),
       // Tokens the wallet owns (for surfacing ownable items)
       query('SELECT contract_id, token_id FROM nft_ownership WHERE owner_address = ? ORDER BY updated_at DESC LIMIT 100', [wallet]),
@@ -1431,6 +2057,16 @@ app.get('/api/collections/social', async (req, res) => {
   }
 })
 
+async function socialActorLabel(wallet: string) {
+  const rows = await query<{ creator_username: string | null; display_name: string }[]>(
+    'SELECT creator_username, display_name FROM user_profiles WHERE LOWER(wallet_address) = LOWER(?) LIMIT 1',
+    [wallet],
+  )
+  const username = rows[0]?.creator_username?.trim().replace(/^@/, '')
+  const displayName = rows[0]?.display_name?.trim()
+  return username ? `@${username}` : displayName || 'A collector'
+}
+
 app.post('/api/collections/:collectionId/like', requireWallet, async (req, res) => {
   const wallet = res.locals.wallet as string
   const collectionId = slug(String(req.params.collectionId))
@@ -1442,6 +2078,13 @@ app.post('/api/collections/:collectionId/like', requireWallet, async (req, res) 
   }
   await query('DELETE FROM collection_dislikes WHERE LOWER(wallet_address) = LOWER(?) AND collection_id = ?', [wallet, collectionId])
   await query('INSERT INTO collection_likes (wallet_address, collection_id) VALUES (?, ?) ON CONFLICT DO NOTHING', [wallet, collectionId])
+  const target = await query<{ owner_wallet: string; name: string }[]>(
+    'SELECT owner_wallet, name FROM collections WHERE slug = ? LIMIT 1', [collectionId],
+  )
+  if (target.length && target[0].owner_wallet.toLowerCase() !== wallet.toLowerCase()) {
+    const actor = await socialActorLabel(wallet)
+    await notifyUser(target[0].owner_wallet, 'collection_like', 'Your collection got a like', `${actor} liked ${target[0].name}.`, `/collection/${encodeURIComponent(collectionId)}`).catch(() => undefined)
+  }
   res.json({ liked: true, collectionId })
 })
 
@@ -1556,35 +2199,116 @@ app.post('/api/notifications/:id/read', requireWallet, async (req, res) => {
 
 // ---- Social posts & creator follows ----
 
-// Stories are visible only to the collection owner and wallets following that
-// collection. There is deliberately no public/global story feed.
+// Stories are private to the social graph: creator stories are visible to
+// mutual-edge audiences (people the viewer follows or who follow the viewer),
+// and collection stories to followers, owners, or current holders.
 app.get('/api/collection-stories', requireWallet, async (_req, res) => {
   const wallet = res.locals.wallet as string
   try {
     await ensureSchema()
-    const rows = await query<{ collection_id: string; name: string; cover: string; owner_wallet: string; id: number | null; media_url: string | null; media_type: string | null; caption: string | null; created_at: string | null; expires_at: string | null }[]>(
+    const creatorIds = await query<{ creator_wallet: string }[]>(
+      `SELECT DISTINCT creator_wallet FROM (
+         SELECT COALESCE(p.wallet_address, f.creator_id) AS creator_wallet FROM creator_follows f LEFT JOIN user_profiles p ON LOWER(p.creator_username) = LOWER(f.creator_id) WHERE LOWER(f.wallet_address) = LOWER(?)
+         UNION SELECT f.wallet_address AS creator_wallet FROM creator_follows f WHERE LOWER(f.creator_id) = LOWER(?) OR LOWER(f.creator_id) = LOWER(COALESCE((SELECT creator_username FROM user_profiles WHERE LOWER(wallet_address) = LOWER(?)), ''))
+         UNION SELECT ? AS creator_wallet
+       ) audience`, [wallet, wallet, wallet, wallet],
+    )
+    const allowedCreators = creatorIds.map((row) => row.creator_wallet)
+    const creatorGroups: { kind: 'creator'; collectionId: string; creatorWallet: string; name: string; cover: string; isMine: boolean; stories: object[] }[] = []
+    if (allowedCreators.length) {
+      const rows = await query<{ creator_wallet: string; display_name: string | null; creator_username: string | null; avatar: string | null; id: number | null; media_url: string | null; media_type: string | null; caption: string | null; created_at: string | null; expires_at: string | null; viewed: boolean | null }[]>(
+        `SELECT audience.creator_wallet, p.display_name, p.creator_username, p.avatar,
+                s.id, s.media_url, s.media_type, s.caption, s.created_at, s.expires_at,
+                EXISTS (SELECT 1 FROM story_views v WHERE v.story_kind = 'creator' AND v.story_id = s.id AND LOWER(v.viewer_wallet) = LOWER(?)) AS viewed
+         FROM unnest(?::varchar[]) AS audience(creator_wallet)
+         LEFT JOIN user_profiles p ON LOWER(p.wallet_address) = LOWER(audience.creator_wallet)
+         LEFT JOIN creator_stories s ON LOWER(s.creator_wallet) = LOWER(audience.creator_wallet) AND s.expires_at > now()
+         ORDER BY (LOWER(audience.creator_wallet) = LOWER(?)) DESC, s.created_at ASC NULLS FIRST`,
+        [wallet, allowedCreators, wallet],
+      )
+      const groups = new Map<string, (typeof creatorGroups)[number]>()
+      for (const row of rows) {
+        const key = row.creator_wallet.toLowerCase()
+        let group = groups.get(key)
+        if (!group) {
+          group = { kind: 'creator', collectionId: `creator:${key}`, creatorWallet: row.creator_wallet, name: row.creator_username ? `@${row.creator_username}` : row.display_name || shortenWallet(row.creator_wallet), cover: row.avatar || '', isMine: key === wallet.toLowerCase(), stories: [] }
+          groups.set(key, group)
+        }
+        if (row.id !== null) group.stories.push({ id: Number(row.id), mediaUrl: row.media_url, mediaType: row.media_type === 'video' ? 'video' : 'image', caption: row.caption, createdAt: row.created_at, expiresAt: row.expires_at, viewed: Boolean(row.viewed) })
+      }
+      creatorGroups.push(...groups.values())
+    }
+    const collectionRows = await query<{ collection_id: string; name: string; cover: string; owner_wallet: string; id: number | null; media_url: string | null; media_type: string | null; caption: string | null; created_at: string | null; expires_at: string | null; viewed: boolean | null }[]>(
       `SELECT c.slug AS collection_id, c.name, c.cover, c.owner_wallet,
-              s.id, s.media_url, s.media_type, s.caption, s.created_at, s.expires_at
+              s.id, s.media_url, s.media_type, s.caption, s.created_at, s.expires_at,
+              EXISTS (SELECT 1 FROM story_views v WHERE v.story_kind = 'collection' AND v.story_id = s.id AND LOWER(v.viewer_wallet) = LOWER(?)) AS viewed
        FROM collections c
        LEFT JOIN collection_stories s ON s.collection_id = c.slug AND s.expires_at > now()
        WHERE LOWER(c.owner_wallet) = LOWER(?)
           OR EXISTS (SELECT 1 FROM collection_subscriptions sub WHERE LOWER(sub.wallet_address) = LOWER(?) AND sub.collection_id = c.slug)
+          OR EXISTS (SELECT 1 FROM token_collections tc JOIN nft_ownership own ON own.contract_id = tc.contract_id AND own.token_id = tc.token_id WHERE tc.collection_id = c.slug AND LOWER(own.owner_address) = LOWER(?))
        ORDER BY (LOWER(c.owner_wallet) = LOWER(?)) DESC, s.created_at ASC NULLS FIRST`,
-      [wallet, wallet, wallet],
+      [wallet, wallet, wallet, wallet, wallet],
     )
-    const groups = new Map<string, { collectionId: string; name: string; cover: string; isMine: boolean; stories: object[] }>()
-    for (const row of rows) {
-      let group = groups.get(row.collection_id)
+    const collectionGroups: { kind: 'collection'; collectionId: string; name: string; cover: string; isMine: boolean; stories: object[] }[] = []
+    const groupedCollections = new Map<string, (typeof collectionGroups)[number]>()
+    for (const row of collectionRows) {
+      let group = groupedCollections.get(row.collection_id)
       if (!group) {
-        group = { collectionId: row.collection_id, name: row.name, cover: row.cover, isMine: row.owner_wallet.toLowerCase() === wallet.toLowerCase(), stories: [] }
-        groups.set(row.collection_id, group)
+        group = { kind: 'collection', collectionId: row.collection_id, name: row.name, cover: row.cover, isMine: row.owner_wallet.toLowerCase() === wallet.toLowerCase(), stories: [] }
+        groupedCollections.set(row.collection_id, group)
       }
-      if (row.id !== null) group.stories.push({ id: Number(row.id), mediaUrl: row.media_url, mediaType: row.media_type, caption: row.caption, createdAt: row.created_at, expiresAt: row.expires_at })
+      if (row.id !== null) group.stories.push({ id: Number(row.id), mediaUrl: row.media_url, mediaType: row.media_type === 'video' ? 'video' : 'image', caption: row.caption, createdAt: row.created_at, expiresAt: row.expires_at, viewed: Boolean(row.viewed) })
     }
-    res.json({ groups: [...groups.values()] })
+    collectionGroups.push(...[...groupedCollections.values()].filter((group) => group.stories.length > 0))
+    const ownStoryGroup = creatorGroups.find((group) => group.isMine)
+    const followedCreatorGroups = creatorGroups.filter((group) => !group.isMine && group.stories.length > 0)
+    res.json({ groups: [...(ownStoryGroup ? [ownStoryGroup] : []), ...followedCreatorGroups, ...collectionGroups] })
   } catch (error) {
     res.status(503).json({ error: error instanceof Error ? error.message : 'Stories query failed' })
   }
+})
+
+app.post('/api/creator-stories', requireWallet, async (req, res) => {
+  const wallet = res.locals.wallet as string
+  const mediaUrl = String(req.body?.mediaUrl ?? '').trim().slice(0, 1024)
+  const mediaType = String(req.body?.mediaType ?? 'image') === 'video' ? 'video' : 'image'
+  const caption = String(req.body?.caption ?? '').trim().slice(0, 500)
+  if (!mediaUrl && !caption) return res.status(400).json({ error: 'Add a photo, video, or caption to your status' })
+  if (mediaUrl && !/^https?:\/\//i.test(mediaUrl)) return res.status(400).json({ error: 'Story media must be a public http or https URL' })
+  await ensureSchema()
+  const inserted = await query<{ id: number; created_at: string; expires_at: string }[]>(
+    `INSERT INTO creator_stories (creator_wallet, media_url, media_type, caption, expires_at)
+     VALUES (?, ?, ?, ?, now() + interval '24 hours') RETURNING id, created_at, expires_at`,
+    [wallet, mediaUrl, mediaType, caption],
+  )
+  res.status(201).json({ story: { id: Number(inserted[0].id), mediaUrl, mediaType, caption, createdAt: inserted[0].created_at, expiresAt: inserted[0].expires_at } })
+})
+
+app.post('/api/stories/:kind/:id/viewed', requireWallet, async (req, res) => {
+  const wallet = res.locals.wallet as string
+  const kind = req.params.kind === 'creator' || req.params.kind === 'collection' ? req.params.kind : null
+  const id = Number(req.params.id)
+  if (!kind || !Number.isSafeInteger(id) || id < 1) return res.status(400).json({ error: 'Invalid story reference' })
+  await ensureSchema()
+  let accessible = false
+  if (kind === 'creator') {
+    accessible = (await query<{ id: number }[]>(
+      `SELECT s.id FROM creator_stories s WHERE s.id = ? AND s.expires_at > now() AND (
+         LOWER(s.creator_wallet) = LOWER(?) OR EXISTS (SELECT 1 FROM creator_follows f WHERE LOWER(f.wallet_address) = LOWER(?) AND LOWER(f.creator_id) IN (LOWER(s.creator_wallet), LOWER(COALESCE((SELECT creator_username FROM user_profiles WHERE LOWER(wallet_address) = LOWER(s.creator_wallet)), '')))) OR EXISTS (SELECT 1 FROM creator_follows f WHERE LOWER(f.wallet_address) = LOWER(s.creator_wallet) AND LOWER(f.creator_id) IN (LOWER(?), LOWER(COALESCE((SELECT creator_username FROM user_profiles WHERE LOWER(wallet_address) = LOWER(?)), ''))))
+       )`, [id, wallet, wallet, wallet, wallet],
+    )).length > 0
+  } else {
+    accessible = (await query<{ id: number }[]>(
+      `SELECT s.id FROM collection_stories s JOIN collections c ON c.slug = s.collection_id
+       WHERE s.id = ? AND s.expires_at > now() AND (
+         LOWER(c.owner_wallet) = LOWER(?) OR EXISTS (SELECT 1 FROM collection_subscriptions sub WHERE LOWER(sub.wallet_address) = LOWER(?) AND sub.collection_id = c.slug) OR EXISTS (SELECT 1 FROM token_collections tc JOIN nft_ownership own ON own.contract_id = tc.contract_id AND own.token_id = tc.token_id WHERE tc.collection_id = c.slug AND LOWER(own.owner_address) = LOWER(?))
+       )`, [id, wallet, wallet, wallet],
+    )).length > 0
+  }
+  if (!accessible) return res.status(404).json({ error: 'Story not found or not available to this wallet' })
+  await query(`INSERT INTO story_views (story_kind, story_id, viewer_wallet) VALUES (?, ?, ?) ON CONFLICT (story_kind, story_id, viewer_wallet) DO UPDATE SET viewed_at = now()`, [kind, id, wallet])
+  res.json({ viewed: true })
 })
 
 app.post('/api/collections/:collectionId/stories', requireWallet, async (req, res) => {
@@ -1614,16 +2338,23 @@ app.get('/api/posts', async (req, res) => {
   try {
     await ensureSchema()
     const collectionId = req.query.collectionId ? slug(String(req.query.collectionId)) : ''
+    const creatorWalletRaw = String(req.query.creatorWallet ?? '')
+    const creatorWallet = stellarAddress.test(creatorWalletRaw) ? creatorWalletRaw : ''
     const postIdRaw = String(req.query.postId ?? '')
     const postId = /^\d+$/.test(postIdRaw) && Number.isSafeInteger(Number(postIdRaw)) ? Number(postIdRaw) : null
-    const rows = await query<{ id: number; author: string; author_name: string; creator_username: string | null; profile_display_name: string | null; avatar: string; media_url: string; media_type: string; caption: string; linked_nft_id: string | null; post_kind: string; author_type: 'user' | 'collection'; collection_id: string | null; price_xlm: string | null; created_at: string }[]>(
-      `SELECT posts.id, posts.author, posts.author_name, p.creator_username, p.display_name AS profile_display_name, posts.avatar, posts.media_url, posts.media_type, posts.caption, posts.linked_nft_id, posts.post_kind, posts.author_type, posts.collection_id, posts.price_xlm, posts.created_at
+    const rows = await query<{ id: number; author: string; author_name: string; creator_username: string | null; profile_display_name: string | null; avatar: string; media_url: string; media_type: string; caption: string; linked_nft_id: string | null; post_kind: string; author_type: 'user' | 'collection'; collection_id: string | null; price_xlm: string | null; created_at: string; tips_count: number; tips_total_xlm: string }[]>(
+      `SELECT posts.id, posts.author, posts.author_name, p.creator_username, p.display_name AS profile_display_name,
+              CASE WHEN posts.author_type = 'user' THEN COALESCE(NULLIF(p.avatar, ''), posts.avatar) ELSE posts.avatar END AS avatar,
+              posts.media_url, posts.media_type, posts.caption, posts.linked_nft_id, posts.post_kind, posts.author_type, posts.collection_id, posts.price_xlm, posts.created_at,
+              (SELECT COUNT(*)::int FROM post_tips pt WHERE pt.post_id = posts.id) AS tips_count,
+              COALESCE((SELECT SUM(pt.amount_xlm)::text FROM post_tips pt WHERE pt.post_id = posts.id), '0') AS tips_total_xlm
        FROM posts LEFT JOIN user_profiles p ON p.wallet_address = posts.author
        WHERE COALESCE((to_jsonb(posts)->>'is_demo')::boolean, FALSE) = FALSE
          AND (? = '' OR posts.collection_id = ?)
+         AND (? = '' OR lower(posts.author) = lower(?))
          AND (?::bigint IS NULL OR posts.id = ?)
        ORDER BY posts.created_at DESC LIMIT CASE WHEN ?::bigint IS NULL THEN 100 ELSE 1 END`,
-      [collectionId, collectionId, postId, postId, postId],
+      [collectionId, collectionId, creatorWallet, creatorWallet, postId, postId, postId],
     )
     if (rows.length === 0) return res.json({ posts: [] })
     const postIds = rows.map((row) => Number(row.id))
@@ -1660,7 +2391,8 @@ app.get('/api/posts', async (req, res) => {
       const authorName = row.author_type === 'collection'
         ? row.author_name
         : row.creator_username ? `@${row.creator_username}` : row.profile_display_name?.trim() || 'Creator'
-      return { ...row, author: publicAuthorId, author_name: authorName, is_me: Boolean(wallet) && row.author.toLowerCase() === wallet.toLowerCase(), creator_username: undefined, profile_display_name: undefined, id, likes: likesByPost.get(id) ?? 0, dislikes: dislikesByPost.get(id) ?? 0, reposts: repostsByPost.get(id) ?? 0, comments, liked: likedSet.has(id), reposted: repostSet.has(id) }
+      const tipRecipient = row.author_type === 'user' && row.post_kind === 'post' && !row.collection_id && !row.linked_nft_id && Boolean(row.media_url) ? row.author : null
+      return { ...row, author: publicAuthorId, creator_wallet: row.author_type === 'user' ? row.author : null, tip_recipient: tipRecipient, author_name: authorName, is_me: Boolean(wallet) && row.author.toLowerCase() === wallet.toLowerCase(), creator_username: undefined, profile_display_name: undefined, id, likes: likesByPost.get(id) ?? 0, dislikes: dislikesByPost.get(id) ?? 0, reposts: repostsByPost.get(id) ?? 0, comments, liked: likedSet.has(id), reposted: repostSet.has(id), tips_count: Number(row.tips_count ?? 0), tips_total_xlm: row.tips_total_xlm ?? '0' }
     })
     res.json({ posts })
   } catch (error) {
@@ -1669,6 +2401,7 @@ app.get('/api/posts', async (req, res) => {
 })
 
 app.post('/api/posts', requireWallet, async (req, res) => {
+  await ensureSchema()
   const wallet = res.locals.wallet as string
   const caption = String(req.body?.caption ?? '').trim().slice(0, 1000)
   const mediaUrl = String(req.body?.mediaUrl ?? '').trim().slice(0, 1024)
@@ -1677,11 +2410,11 @@ app.post('/api/posts', requireWallet, async (req, res) => {
   const collectionId = req.body?.collectionId ? slug(String(req.body.collectionId)) : null
   const kind = String(req.body?.kind ?? 'post') === 'drop' ? 'drop' : 'post'
   const priceRaw = kind === 'drop' ? Number(req.body?.price) : NaN
-  if (kind === 'post' && !collectionId && !linkedNftId) return res.status(400).json({ error: 'A post must quote an NFT you own' })
+  if (kind === 'post' && !collectionId && !caption && !mediaUrl && !linkedNftId) return res.status(400).json({ error: 'Add artwork, a caption, or an NFT to share' })
   if (kind === 'post' && collectionId && !caption && !mediaUrl) return res.status(400).json({ error: 'A collection update needs a caption or media' })
   if (kind === 'drop' && !linkedNftId) return res.status(400).json({ error: 'A drop must link an NFT you are issuing' })
   if (kind === 'drop' && (!Number.isFinite(priceRaw) || priceRaw < 0)) return res.status(400).json({ error: 'A drop needs a valid price in XLM' })
-  if (kind === 'post' && !collectionId) {
+  if (kind === 'post' && !collectionId && linkedNftId) {
     const tokenRef = linkedNftId?.match(/^minted-(c[a-z0-9]+)-(\d+)$/)
     if (!tokenRef) return res.status(400).json({ error: 'Choose an NFT from your wallet' })
     const owned = await query<{ owner_address: string }[]>(
@@ -1711,6 +2444,64 @@ app.post('/api/posts', requireWallet, async (req, res) => {
   res.status(201).json({ id: result[0]?.id ?? 0 })
 })
 
+app.post('/api/posts/:id/tips', requireWallet, async (req, res) => {
+  await ensureSchema()
+  const wallet = res.locals.wallet as string
+  const postId = Number(req.params.id)
+  const txHash = String(req.body?.transactionHash ?? '').trim().toLowerCase()
+  if (!Number.isSafeInteger(postId) || postId <= 0) return res.status(400).json({ error: 'Invalid post id' })
+  if (!/^[a-f0-9]{64}$/.test(txHash)) return res.status(400).json({ error: 'A valid Stellar transaction hash is required' })
+  const post = await query<{ author: string; author_type: string; post_kind: string; collection_id: string | null; linked_nft_id: string | null; media_url: string }[]>(
+    'SELECT author, author_type, post_kind, collection_id, linked_nft_id, media_url FROM posts WHERE id = ?', [postId],
+  )
+  if (!post.length) return res.status(404).json({ error: 'Post not found' })
+  const target = post[0]
+  if (target.author_type !== 'user' || target.post_kind !== 'post' || target.collection_id || target.linked_nft_id || !target.media_url) return res.status(409).json({ error: 'Tips are available for individual creator art posts that are not linked to an NFT or collection' })
+  if (target.author.toLowerCase() === wallet.toLowerCase()) return res.status(400).json({ error: 'You cannot tip your own post' })
+
+  const network = String(process.env.VITE_STELLAR_NETWORK ?? 'TESTNET').toUpperCase()
+  const horizon = network === 'PUBLIC' ? 'https://horizon.stellar.org' : 'https://horizon-testnet.stellar.org'
+  try {
+    const txResponse = await fetch(`${horizon}/transactions/${txHash}`, { signal: AbortSignal.timeout(10_000) })
+    if (!txResponse.ok) return res.status(409).json({ error: 'The tip transaction is not confirmed on the configured Stellar network yet' })
+    const tx = await txResponse.json() as { successful?: boolean; source_account?: string; memo_type?: string; memo?: string; ledger?: number }
+    if (tx.successful !== true || tx.source_account?.toLowerCase() !== wallet.toLowerCase() || tx.memo_type !== 'text' || tx.memo !== `SN tip ${postId}`) {
+      return res.status(400).json({ error: 'This transaction does not match your tip for this art post' })
+    }
+    const operationResponse = await fetch(`${horizon}/transactions/${txHash}/operations?limit=10`, { signal: AbortSignal.timeout(10_000) })
+    if (!operationResponse.ok) return res.status(503).json({ error: 'Could not verify the confirmed tip payment yet' })
+    const operationData = await operationResponse.json() as { _embedded?: { records?: { type?: string; from?: string; to?: string; amount?: string; asset_type?: string; source_account?: string }[] } }
+    const operations = operationData._embedded?.records ?? []
+    if (operations.length !== 1) return res.status(400).json({ error: 'The tip transaction must contain one direct XLM payment' })
+    const payment = operations[0]
+    const amount = payment.amount ?? ''
+    const amountNumber = Number(amount)
+    if (payment.type !== 'payment' || payment.asset_type !== 'native' || payment.to?.toLowerCase() !== target.author.toLowerCase() || (payment.from ?? payment.source_account)?.toLowerCase() !== wallet.toLowerCase() || !Number.isFinite(amountNumber) || amountNumber <= 0 || amountNumber > 10_000 || !/^\d+(?:\.\d{1,7})?$/.test(amount)) {
+      return res.status(400).json({ error: 'The confirmed transaction is not a valid XLM tip to this creator' })
+    }
+    const inserted = await query<{ tx_hash: string }[]>(
+      'INSERT INTO post_tips (tx_hash, post_id, sender, recipient, amount_xlm, ledger) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (tx_hash) DO NOTHING RETURNING tx_hash',
+      [txHash, postId, wallet, target.author, amount, Number(tx.ledger ?? 0)],
+    )
+    if (!inserted.length) {
+      const existing = await query<{ post_id: number; sender: string; recipient: string; amount_xlm: string }[]>(
+        'SELECT post_id, sender, recipient, amount_xlm FROM post_tips WHERE tx_hash = ?', [txHash],
+      )
+      if (!existing.length || Number(existing[0].post_id) !== postId || existing[0].sender.toLowerCase() !== wallet.toLowerCase() || existing[0].recipient.toLowerCase() !== target.author.toLowerCase()) {
+        return res.status(409).json({ error: 'This Stellar transaction was already recorded for another tip' })
+      }
+    } else {
+      await query('INSERT INTO notifications (wallet_address, kind, title, body) VALUES (?, ?, ?, ?)', [target.author, 'post_tip', 'You received a tip', `${amount} XLM was sent for your art post. https://stellanova-fawn.vercel.app/post/${postId}`])
+    }
+    const totals = await query<{ tips_count: number; tips_total_xlm: string }[]>(
+      'SELECT COUNT(*)::int AS tips_count, COALESCE(SUM(amount_xlm)::text, \'0\') AS tips_total_xlm FROM post_tips WHERE post_id = ?', [postId],
+    )
+    res.status(inserted.length ? 201 : 200).json({ postId, transactionHash: txHash, amountXlm: amount, duplicate: !inserted.length, tipsCount: Number(totals[0]?.tips_count ?? 0), tipsTotalXlm: totals[0]?.tips_total_xlm ?? '0' })
+  } catch (error) {
+    res.status(503).json({ error: error instanceof Error ? error.message : 'Could not verify the tip transaction' })
+  }
+})
+
 async function postStateForWallet(postId: number, wallet: string): Promise<{ liked: boolean; reposted: boolean }> {
   const [lk, rp] = await Promise.all([
     query<{ c: number }[]>('SELECT COUNT(*) AS c FROM post_likes WHERE wallet_address = ? AND post_id = ?', [wallet, postId]),
@@ -1729,6 +2520,18 @@ app.post('/api/posts/:id/like', requireWallet, async (req, res) => {
   }
   await query('DELETE FROM post_dislikes WHERE wallet_address = ? AND post_id = ?', [wallet, postId])
   await query('INSERT INTO post_likes (wallet_address, post_id) VALUES (?, ?)', [wallet, postId])
+  const target = await query<{ author: string; author_type: string; collection_id: string | null; owner_wallet: string | null; caption: string }[]>(
+    `SELECT p.author, p.author_type, p.collection_id, c.owner_wallet, p.caption
+     FROM posts p LEFT JOIN collections c ON c.slug = p.collection_id WHERE p.id = ? LIMIT 1`,
+    [postId],
+  )
+  const recipient = target[0]?.author_type === 'collection' ? target[0]?.owner_wallet : target[0]?.author
+  if (recipient && recipient.toLowerCase() !== wallet.toLowerCase()) {
+    const actor = await socialActorLabel(wallet)
+    const postLabel = target[0].caption.trim().slice(0, 100)
+    const body = postLabel ? `${actor} liked your post: “${postLabel}”` : `${actor} liked your post.`
+    await notifyUser(recipient, 'post_like', 'Your post got a like', body, `/post/${postId}`).catch(() => undefined)
+  }
   res.status(201).json({ liked: true, postId })
 })
 
@@ -1770,7 +2573,6 @@ app.post('/api/posts/:id/repost', requireWallet, async (req, res) => {
   res.status(201).json({ reposted: true, postId })
 })
 
-// Public, non-sensitive creator fields used by NFT cards and wallet creator pages.
 app.get('/api/creators/profiles', async (req, res) => {
   const wallets = [...new Set(String(req.query.wallets ?? '').split(',').filter((wallet) => stellarAddress.test(wallet)))].slice(0, 100)
   if (!wallets.length) return res.json({ profiles: [] })
@@ -1793,6 +2595,35 @@ app.get('/api/creators/profiles', async (req, res) => {
     res.json({ profiles })
   } catch (error) {
     res.status(503).json({ error: error instanceof Error ? error.message : 'Creator profiles are unavailable' })
+  }
+})
+
+// Resolve a creator's shareable public profile by username or wallet address.
+app.get('/api/creators/profile/:id', async (req, res) => {
+  const identifier = String(req.params.id ?? '').trim().replace(/^@/, '')
+  const isWallet = stellarAddress.test(identifier)
+  if (!isWallet && !/^[a-z][a-z0-9_]{2,23}$/i.test(identifier)) return res.status(400).json({ error: 'Use a creator username or Stellar address' })
+  if (!databaseAvailable()) return res.status(503).json({ error: 'Persistent database is not configured' })
+  try {
+    await ensureSchema()
+    const profiles = await query<{
+      wallet_address: string; display_name: string; creator_username: string | null; avatar: string; bio: string; is_creator: boolean; is_verified: boolean;
+      collection_count: number; collector_count: number
+    }[]>(
+      `SELECT p.wallet_address, p.display_name, p.creator_username, p.avatar, p.bio, p.is_creator, p.is_verified,
+              COUNT(DISTINCT c.id)::int AS collection_count,
+              (SELECT COUNT(*)::int FROM creator_follows f WHERE lower(f.creator_id) = lower(p.wallet_address)) AS collector_count
+       FROM user_profiles p
+       LEFT JOIN collections c ON lower(c.owner_wallet) = lower(p.wallet_address)
+       WHERE ( ? = TRUE AND lower(p.wallet_address) = lower(?) ) OR lower(p.creator_username) = lower(?)
+       GROUP BY p.wallet_address, p.display_name, p.creator_username, p.avatar, p.bio, p.is_creator, p.is_verified
+       LIMIT 1`,
+      [isWallet, identifier, identifier],
+    )
+    if (!profiles.length) return res.status(404).json({ error: 'Creator profile not found' })
+    return res.json({ profile: profiles[0] })
+  } catch (error) {
+    return res.status(503).json({ error: error instanceof Error ? error.message : 'Creator profile is unavailable' })
   }
 })
 
@@ -1891,10 +2722,11 @@ app.post('/api/account/collections', requireWallet, async (req, res) => {
   const symbol = String(req.body?.symbol ?? '').trim().toUpperCase().slice(0, 20)
   const description = String(req.body?.description ?? '').trim().slice(0, 1000)
   const cover = String(req.body?.cover ?? '').trim().slice(0, 1024)
-  const totalSupply = Number(req.body?.totalSupply)
+  const rawTotalSupply = req.body?.totalSupply
+  const totalSupply = rawTotalSupply === null || rawTotalSupply === undefined || rawTotalSupply === '' ? null : Number(rawTotalSupply)
   const contractId = String(req.body?.contractId ?? '').trim()
   if (!name || !symbol) return res.status(400).json({ error: 'A collection needs a name and a symbol' })
-  if (!Number.isSafeInteger(totalSupply) || totalSupply < 1 || totalSupply > 10000000) return res.status(400).json({ error: 'Set a total supply between 1 and 10,000,000' })
+  if (totalSupply !== null && (!Number.isSafeInteger(totalSupply) || totalSupply < 1 || totalSupply > 10000000)) return res.status(400).json({ error: 'Set a total supply between 1 and 10,000,000, or leave it open' })
   if (!/^C[A-Z2-7]{55}$/.test(contractId)) return res.status(400).json({ error: 'Deploy the current NFT contract on Testnet before creating a collection' })
   const baseSlug = slug(symbol.toLowerCase() + '-' + name)
   try {
@@ -2126,6 +2958,63 @@ app.get('/api/collections', async (_req, res) => {
   }
 })
 
+app.post('/api/collections/:slug/royalty-registry', requireWallet, async (req, res) => {
+  const wallet = String(res.locals.wallet ?? '')
+  const slug = String(req.params.slug ?? '').trim().toLowerCase()
+  const marketplaceId = process.env.STELLAR_MARKETPLACE_CONTRACT_ID ?? process.env.VITE_STELLAR_MARKETPLACE_CONTRACT_ID ?? ''
+  const secret = process.env.STELLAR_DEPLOYER_SECRET ?? ''
+  if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(slug)) return res.status(400).json({ error: 'Invalid collection.' })
+  if ((process.env.VITE_STELLAR_NETWORK ?? process.env.STELLAR_NETWORK ?? 'TESTNET').toUpperCase() !== 'TESTNET') return res.status(503).json({ error: 'Legacy royalty registration is currently enabled on Testnet only.' })
+  if (!/^C[A-Z2-7]{55}$/.test(marketplaceId) || !secret) return res.status(503).json({ error: 'The Testnet marketplace admin signer is not configured.' })
+  try {
+    await ensureSchema()
+    const collection = await query<{ owner_wallet: string; contract_id: string | null }[]>(
+      'SELECT owner_wallet, contract_id FROM collections WHERE slug = ? LIMIT 1', [slug],
+    )
+    if (!collection.length || collection[0].owner_wallet.toLowerCase() !== wallet.toLowerCase()) return res.status(403).json({ error: 'Only this collection’s recorded creator can configure royalties.' })
+    const nftContract = collection[0].contract_id ?? ''
+    if (!/^C[A-Z2-7]{55}$/.test(nftContract)) return res.status(409).json({ error: 'This collection has no deployed NFT contract.' })
+    const tokenRows = await query<{ token_id: number }[]>(
+      'SELECT token_id FROM nft_mints WHERE LOWER(contract_id) = LOWER(?) AND collection_id = ? ORDER BY token_id', [nftContract, slug],
+    )
+    const keypair = StellarSdk.Keypair.fromSecret(secret)
+    const rpcUrl = process.env.STELLAR_RPC_URL ?? process.env.VITE_SOROBAN_RPC_URL ?? 'https://soroban-testnet.stellar.org'
+    const rpc = new StellarSdk.rpc.Server(rpcUrl)
+    const tokenIds = tokenRows.map((row) => Number(row.token_id)).filter((id) => Number.isInteger(id) && id >= 0)
+    const batches: number[][] = []
+    if (!tokenIds.length) batches.push([])
+    else for (let i = 0; i < tokenIds.length; i += 100) batches.push(tokenIds.slice(i, i + 100))
+    for (const batch of batches) {
+      const account = await rpc.getAccount(keypair.publicKey())
+      const operation = new StellarSdk.Contract(marketplaceId).call(
+        'register_legacy_collection',
+        StellarSdk.nativeToScVal(nftContract, { type: 'address' }),
+        StellarSdk.nativeToScVal(slug, { type: 'string' }),
+        StellarSdk.nativeToScVal(wallet, { type: 'address' }),
+        StellarSdk.nativeToScVal(batch, { type: 'u32' }),
+      )
+      const tx = new StellarSdk.TransactionBuilder(account, { fee: StellarSdk.BASE_FEE, networkPassphrase: StellarSdk.Networks.TESTNET })
+        .addOperation(operation as never).setTimeout(60).build()
+      const prepared = await rpc.prepareTransaction(tx)
+      prepared.sign(keypair)
+      const sent = await rpc.sendTransaction(prepared)
+      if (sent.status === 'ERROR') throw new Error('Stellar RPC rejected the legacy royalty registry transaction.')
+      let confirmed = false
+      for (let attempt = 0; attempt < 30; attempt += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 1000))
+        const result = await rpc.getTransaction(sent.hash)
+        if (result.status === 'SUCCESS') { confirmed = true; break }
+        if (result.status === 'FAILED') throw new Error('The marketplace rejected legacy royalty registration. Confirm its admin signer matches STELLAR_DEPLOYER_SECRET and deploy the updated marketplace contract.')
+      }
+      if (!confirmed) throw new Error('Legacy royalty registration confirmation timed out. Retry saving the royalty.')
+    }
+    res.json({ registered: true, tokenCount: tokenIds.length })
+  } catch (error) {
+    console.error('Legacy creator royalty registry failed:', error)
+    res.status(503).json({ error: error instanceof Error ? error.message : 'Could not register this collection for royalties.' })
+  }
+})
+
 app.get('/api/collections/:slug/mint-history', async (req, res) => {
   if (!databaseAvailable()) return res.status(503).json({ error: 'Persistent database is not configured' })
   const slugValue = slug(String(req.params.slug))
@@ -2134,13 +3023,13 @@ app.get('/api/collections/:slug/mint-history', async (req, res) => {
     const collection = await collectionBySlug(slugValue)
     if (!collection?.contract_id) return res.status(404).json({ error: 'Collection contract not found' })
     const stageRows = await query<{ wallet: string; stage_name: string; stage_minted: number; last_ledger: number }[]>(
-      `SELECT e.wallet, COALESCE(NULLIF(s.name, ''), s.kind) AS stage_name,
-              COUNT(DISTINCT minted.token_id)::int AS stage_minted, MAX(e.ledger)::int AS last_ledger
-       FROM stage_mint_events e
-       JOIN mint_stages s ON s.id = e.stage_id
-       CROSS JOIN LATERAL unnest(e.token_ids) AS minted(token_id)
-       WHERE s.collection_id = ? AND LOWER(e.contract_id) = LOWER(?)
-       GROUP BY e.wallet, s.name, s.kind ORDER BY e.wallet, stage_name`,
+      `SELECT v.minter AS wallet, COALESCE(NULLIF(s.name, ''), s.kind, 'Direct mint') AS stage_name,
+              COUNT(*)::int AS stage_minted, MAX(v.ledger)::int AS last_ledger
+       FROM verified_nft_mints v
+       JOIN nft_mints m ON LOWER(m.contract_id) = LOWER(v.contract_id) AND m.token_id = v.token_id
+       LEFT JOIN mint_stages s ON s.id = m.stage_id AND s.collection_id = m.collection_id
+       WHERE m.collection_id = ? AND LOWER(v.contract_id) = LOWER(?)
+       GROUP BY v.minter, s.name, s.kind ORDER BY v.minter, stage_name`,
       [slugValue, collection.contract_id],
     )
     const historyByWallet = new Map<string, { wallet: string; total_minted: number; last_ledger: number; stages: { stage_name: string; stage_minted: number }[] }>()
@@ -2583,13 +3472,13 @@ app.post('/api/admin/collections/:id/verify', requireAdmin, async (req, res) => 
   }
 })
 
-app.get('/api/mail/status', (_req, res) => {
+app.get('/api/mail/status', requireAdmin, (_req, res) => {
   res.json({ configured: mailConfigured(), host: process.env.SMTP_HOST ?? null })
 })
 
 function requireUploadToken(req: express.Request, res: express.Response, next: express.NextFunction) {
   if (!uploadToken) return res.status(503).json({ error: 'Media upload authorization is not configured' })
-  if (req.header('x-nftgram-upload-token') !== uploadToken) return res.status(401).json({ error: 'Invalid media upload authorization' })
+  if (!constantTimeStringEqual(uploadToken, req.header('x-nftgram-upload-token') ?? '')) return res.status(401).json({ error: 'Invalid media upload authorization' })
   next()
 }
 
@@ -2623,6 +3512,12 @@ function shortenWallet(wallet: string) {
 
 function sha256(buffer: Buffer) {
   return crypto.createHash('sha256').update(buffer).digest('hex')
+}
+
+function constantTimeStringEqual(expected: string, supplied: string): boolean {
+  const expectedBytes = Buffer.from(expected)
+  const suppliedBytes = Buffer.from(supplied)
+  return expectedBytes.length === suppliedBytes.length && crypto.timingSafeEqual(expectedBytes, suppliedBytes)
 }
 
 function cloudinarySignature(params: Record<string, string>) {
@@ -2668,6 +3563,32 @@ function supportedMediaType(contentType: string, fileName: string) {
   return null
 }
 
+// Browser MIME headers are user-controlled. Verify signatures before media is
+// stored or sent to an image-analysis provider; the allowlist above alone does
+// not establish the file's real format.
+function mediaSignatureMatches(bytes: Buffer, contentType: string): boolean {
+  const startsWith = (...signature: number[]) => bytes.length >= signature.length && signature.every((value, index) => bytes[index] === value)
+  switch (contentType) {
+    case 'image/png': return startsWith(0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a)
+    case 'image/jpeg': return startsWith(0xff, 0xd8, 0xff)
+    case 'image/webp': return bytes.length >= 12 && bytes.toString('ascii', 0, 4) === 'RIFF' && bytes.toString('ascii', 8, 12) === 'WEBP'
+    case 'image/gif': return bytes.length >= 6 && ['GIF87a', 'GIF89a'].includes(bytes.toString('ascii', 0, 6))
+    case 'video/mp4':
+    case 'audio/mp4': return bytes.length >= 12 && bytes.toString('ascii', 4, 8) === 'ftyp'
+    case 'video/webm': return startsWith(0x1a, 0x45, 0xdf, 0xa3)
+    case 'audio/wav': return bytes.length >= 12 && bytes.toString('ascii', 0, 4) === 'RIFF' && bytes.toString('ascii', 8, 12) === 'WAVE'
+    case 'audio/ogg': return bytes.length >= 4 && bytes.toString('ascii', 0, 4) === 'OggS'
+    case 'audio/mpeg': return (bytes.length >= 3 && bytes.toString('ascii', 0, 3) === 'ID3') || startsWith(0xff, bytes[1] & 0xe0)
+    case 'model/gltf-binary': return bytes.length >= 12 && bytes.toString('ascii', 0, 4) === 'glTF' && bytes.readUInt32LE(4) === 2 && bytes.readUInt32LE(8) === bytes.length
+    case 'model/gltf+json':
+      try {
+        const document = JSON.parse(bytes.toString('utf8')) as { asset?: { version?: unknown } }
+        return Boolean(document && typeof document === 'object' && document.asset && document.asset.version === '2.0')
+      } catch { return false }
+    default: return false
+  }
+}
+
 app.get('/api/media/providers', (_req, res) => {
   const r2Readiness = r2ProductionReadiness()
   const cloudinaryDeliveryBaseUrl = process.env.CLOUDINARY_DELIVERY_BASE_URL
@@ -2697,14 +3618,21 @@ app.get('/api/media/proxy', async (req, res) => {
     return res.status(400).end()
   }
   try {
-    const upstream = await fetch(assetUrl, { signal: AbortSignal.timeout(12_000) })
+    // Do not follow redirects from a third-party media URL. This route is a
+    // constrained Cloudinary image relay; redirects could otherwise turn it
+    // into an SSRF proxy before the final URL is checked.
+    const upstream = await fetch(assetUrl, { redirect: 'manual', signal: AbortSignal.timeout(12_000) })
     const finalUrl = new URL(upstream.url)
     const contentType = upstream.headers.get('content-type')?.split(';')[0].trim().toLowerCase() ?? ''
     if (!upstream.ok || finalUrl.hostname !== 'res.cloudinary.com' || !/^image\/(png|jpeg|webp|gif)$/.test(contentType)) {
+      await upstream.body?.cancel().catch(() => {})
       return res.status(502).end()
     }
     const declaredSize = Number(upstream.headers.get('content-length') ?? 0)
-    if (declaredSize > 10 * 1024 * 1024) return res.status(413).end()
+    if (declaredSize > 10 * 1024 * 1024) {
+      await upstream.body?.cancel().catch(() => {})
+      return res.status(413).end()
+    }
     const bytes = Buffer.from(await upstream.arrayBuffer())
     if (!bytes.length || bytes.length > 10 * 1024 * 1024) return res.status(413).end()
     res.setHeader('Content-Type', contentType)
@@ -2734,7 +3662,7 @@ app.get('/api/media/health', (_req, res) => {
 
 // Return a short-lived upload signature so browsers can send artwork directly
 // to Cloudinary. This keeps media bytes out of Vercel's 4.5 MB function limit.
-app.post('/api/media/upload-signature', requireMediaAuthorization, (req, res) => {
+app.post('/api/media/upload-signature', processRateLimit('media-signature', 30, 10 * 60_000), requireMediaAuthorization, (req, res) => {
   if (!cloudinaryEnabled) return res.status(503).json({ error: 'Cloudinary direct uploads are not configured' })
   const fileName = String(req.body?.fileName ?? '').trim().slice(0, 240)
   const contentType = supportedMediaType(String(req.body?.contentType ?? ''), fileName)
@@ -2755,7 +3683,7 @@ app.post('/api/media/upload-signature', requireMediaAuthorization, (req, res) =>
   res.json({ cloudName: process.env.CLOUDINARY_CLOUD_NAME, apiKey: process.env.CLOUDINARY_API_KEY, timestamp, folder, publicId: params.public_id, signature, key, collectionId, contentType, bytes, sha256: digest })
 })
 
-app.post('/api/media/upload-complete', requireMediaAuthorization, async (req, res) => {
+app.post('/api/media/upload-complete', processRateLimit('media-complete', 12, 10 * 60_000), requireMediaAuthorization, async (req, res) => {
   if (!cloudinaryEnabled) return res.status(503).json({ error: 'Cloudinary direct uploads are not configured' })
   const collectionId = slug(String(req.body?.collection ?? 'unfiled'))
   const fileName = String(req.body?.fileName ?? '').trim().slice(0, 240)
@@ -2764,12 +3692,21 @@ app.post('/api/media/upload-complete', requireMediaAuthorization, async (req, re
   const bytes = Number(req.body?.bytes)
   const urlValue = String(req.body?.cloudinaryUrl ?? '')
   const key = `nftgram/originals/${collectionId}-${digest.slice(0, 16)}-${slug(fileName)}`
-  const expectedPublicId = key.replace(/^nftgram\//, '').replace(/^originals\//, '')
+  const expectedAssetPrefix = `${collectionId}-${digest.slice(0, 16)}-`
   try {
     const assetUrl = new URL(urlValue)
     const assetPath = decodeURIComponent(assetUrl.pathname)
     const cloudNamePath = `/${process.env.CLOUDINARY_CLOUD_NAME}/`
-    if (!contentType || !/^[a-f0-9]{64}$/.test(digest) || !Number.isSafeInteger(bytes) || bytes < 1 || bytes > 25 * 1024 * 1024 || !fileName || assetUrl.protocol !== 'https:' || assetUrl.hostname !== 'res.cloudinary.com' || !assetPath.startsWith(cloudNamePath) || !assetPath.includes('/upload/') || !assetPath.includes(`/${expectedPublicId}`)) {
+    // Cloudinary normalizes uploaded file names/extensions differently across
+    // resource types. Bind the asset to the server-authorized collection and
+    // digest prefix; the full downloaded bytes are checked against SHA-256
+    // below before the upload is accepted.
+    const pathSegments = assetPath.split('/').filter(Boolean)
+    const hasExpectedAssetPrefix = pathSegments.some((segment) => segment.startsWith(expectedAssetPrefix))
+    if (!contentType || !/^[a-f0-9]{64}$/.test(digest) || !Number.isSafeInteger(bytes) || bytes < 1 || bytes > 25 * 1024 * 1024 || !fileName) {
+      return res.status(400).json({ error: 'Upload details are incomplete or exceed the 25 MB limit' })
+    }
+    if (assetUrl.protocol !== 'https:' || assetUrl.hostname !== 'res.cloudinary.com' || !assetPath.startsWith(cloudNamePath) || !assetPath.includes('/upload/') || !hasExpectedAssetPrefix) {
       return res.status(400).json({ error: 'Cloudinary upload details do not match the authorized file' })
     }
     // The browser's digest is only a claim until we hash the uploaded original
@@ -2797,9 +3734,11 @@ app.post('/api/media/upload-complete', requireMediaAuthorization, async (req, re
       }
       chunks.push(value)
     }
-    if (totalBytes !== bytes || sha256(Buffer.concat(chunks.map((chunk) => Buffer.from(chunk)))) !== digest) {
+    const uploadedBytes = Buffer.concat(chunks.map((chunk) => Buffer.from(chunk)))
+    if (totalBytes !== bytes || sha256(uploadedBytes) !== digest) {
       return res.status(400).json({ error: 'Uploaded media bytes did not match the supplied SHA-256 fingerprint' })
     }
+    if (!mediaSignatureMatches(uploadedBytes, contentType)) return res.status(415).json({ error: 'The uploaded bytes do not match the selected media type' })
     const creatorWallet = res.locals.wallet as string | undefined
     if (creatorWallet && databaseAvailable()) {
       await ensureSchema()
@@ -2810,12 +3749,13 @@ app.post('/api/media/upload-complete', requireMediaAuthorization, async (req, re
       )
     }
     res.status(201).json({ sha256: digest, key, original: { r2Url: null, cloudinaryUrl: assetUrl.toString() }, contentType, bytes })
-  } catch {
-    res.status(400).json({ error: 'Invalid Cloudinary asset URL' })
+  } catch (error) {
+    console.error('Cloudinary upload completion failed:', error instanceof Error ? error.message : error)
+    res.status(502).json({ error: 'Could not verify the uploaded artwork. Retry the upload.' })
   }
 })
 
-app.post('/api/media/upload', requireMediaAuthorization, upload.single('file'), async (req, res) => {
+app.post('/api/media/upload', processRateLimit('media-upload', 12, 10 * 60_000), requireMediaAuthorization, upload.single('file'), async (req, res) => {
   const file = req.file
   if (!file) return res.status(400).json({ error: 'Attach a file using the file form field' })
   if (!cloudinaryEnabled && !r2Enabled) return res.status(503).json({ error: 'No media provider is configured' })
@@ -2825,6 +3765,7 @@ app.post('/api/media/upload', requireMediaAuthorization, upload.single('file'), 
     if (!normalizedType) {
       return res.status(415).json({ error: 'Supported NFT media: PNG/JPG/WebP/GIF, MP4/WebM video, MP3/WAV/OGG audio, and GLB/GLTF 3D models (25 MB maximum)' })
     }
+    if (!mediaSignatureMatches(file.buffer, normalizedType)) return res.status(415).json({ error: 'The uploaded bytes do not match the selected media type' })
     file.mimetype = normalizedType
     const digest = sha256(file.buffer)
     const base = `${slug(req.body?.collection ?? 'unfiled')}-${digest.slice(0, 16)}`
@@ -2856,7 +3797,10 @@ app.post('/api/media/upload', requireMediaAuthorization, upload.single('file'), 
 app.post('/api/ai/generate-image', requireWallet, async (req, res) => {
   const prompt = typeof req.body?.prompt === 'string' ? req.body.prompt.trim() : ''
   const transparent = req.body?.transparent === true
-  if (prompt.length < 8 || prompt.length > 1000) return res.status(400).json({ error: 'Describe the artwork in 8–1,000 characters.' })
+  // Collection Studio appends the assigned traits and art direction to the
+  // creator's prompt. FLUX.1 Schnell accepts prompts up to 2,048 characters;
+  // the old 1,000-character API limit rejected otherwise valid compositions.
+  if (prompt.length < 8 || prompt.length > 2048) return res.status(400).json({ error: 'Artwork prompts must be between 8 and 2,048 characters. Shorten the art direction or trait values and try again.' })
   const accountId = process.env.CLOUDFLARE_ACCOUNT_ID?.trim() || (() => {
     try {
       const host = new URL(process.env.CLOUDFLARE_R2_ENDPOINT ?? '').hostname
@@ -2910,23 +3854,28 @@ app.post('/api/ai/plan-collection-traits', requireWallet, async (req, res) => {
     const response = await fetch(`https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(accountId)}/ai/run/@cf/meta/llama-3.2-11b-vision-instruct`, {
       method: 'POST',
       headers: { authorization: `Bearer ${apiToken}`, 'content-type': 'application/json' },
-      body: JSON.stringify({ messages: [{ role: 'user', content: instruction }] }),
+      // Workers AI defaults max_tokens to 256. That truncates a multi-category
+      // trait plan before the closing JSON braces, which used to fall through
+      // the broad catch below as the unhelpful "Could not plan" error.
+      body: JSON.stringify({ messages: [{ role: 'user', content: instruction }], max_tokens: 1200, temperature: 0.2 }),
       signal: AbortSignal.timeout(60_000),
     })
     const result = await response.json().catch(() => null) as { result?: { response?: string }; errors?: { message?: string }[]; messages?: { message?: string }[] } | null
     if (!response.ok) return res.status(response.status === 429 ? 429 : 502).json({ error: result?.errors?.[0]?.message || result?.messages?.[0]?.message || 'AI trait planning failed.' })
     const raw = result?.result?.response?.trim() ?? ''
-    const json = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '')
-    const start = json.indexOf('{'), end = json.lastIndexOf('}')
-    const parsed = start >= 0 && end > start ? JSON.parse(json.slice(start, end + 1)) as { categories?: unknown } : null
+    const parsed = extractAiJsonObject<{ categories?: unknown }>(raw)
+    if (!parsed) {
+      console.warn(JSON.stringify({ event: 'ai_trait_plan_invalid_or_missing_json', responseLength: raw.length }))
+      return res.status(502).json({ error: 'The AI returned an incomplete trait plan. Try generating traits again.' })
+    }
     const categories = Array.isArray(parsed?.categories) ? parsed.categories.flatMap((item) => {
       if (!item || typeof item !== 'object') return []
       const category = item as { name?: unknown; options?: unknown }
-      const name = typeof category.name === 'string' ? category.name.trim().slice(0, 48) : ''
+      const name = typeof category.name === 'string' ? stripAiMarkdown(category.name).slice(0, 48) : ''
       const options = Array.isArray(category.options) ? category.options.flatMap((option) => {
         if (!option || typeof option !== 'object') return []
         const entry = option as { value?: unknown; weight?: unknown }
-        const value = typeof entry.value === 'string' ? entry.value.trim().slice(0, 64) : ''
+        const value = typeof entry.value === 'string' ? stripAiMarkdown(entry.value).slice(0, 64) : ''
         const weight = Number(entry.weight)
         return value ? [{ value, weight: Number.isFinite(weight) ? Math.min(1000, Math.max(1, Math.round(weight))) : 100 }] : []
       }).slice(0, 8) : []
@@ -2941,7 +3890,7 @@ app.post('/api/ai/plan-collection-traits', requireWallet, async (req, res) => {
 
 app.post('/api/ai/analyze-image', requireWallet, visionUpload.single('image'), async (req, res) => {
   const image = req.file
-  if (!image || !['image/jpeg', 'image/png', 'image/webp'].includes(image.mimetype)) {
+  if (!image || !['image/jpeg', 'image/png', 'image/webp'].includes(image.mimetype) || !mediaSignatureMatches(image.buffer, image.mimetype)) {
     return res.status(400).json({ error: 'Upload a JPEG, PNG, or WebP artwork image (up to 5 MB).' })
   }
   const accountId = process.env.CLOUDFLARE_ACCOUNT_ID?.trim() || (() => {
@@ -2966,14 +3915,12 @@ app.post('/api/ai/analyze-image', requireWallet, visionUpload.single('image'), a
     const result = await response.json().catch(() => null) as { result?: { response?: string }; errors?: { message?: string }[]; messages?: { message?: string }[] } | null
     if (!response.ok) return res.status(response.status === 429 ? 429 : 502).json({ error: result?.errors?.[0]?.message || result?.messages?.[0]?.message || 'Cloudflare image analysis failed.' })
     const raw = result?.result?.response?.trim() ?? ''
-    const json = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '')
-    const start = json.indexOf('{'), end = json.lastIndexOf('}')
-    const parsed = start >= 0 && end > start ? JSON.parse(json.slice(start, end + 1)) as { attributes?: unknown } : null
+    const parsed = extractAiJsonObject<{ attributes?: unknown }>(raw)
     const attributes = Array.isArray(parsed?.attributes) ? parsed.attributes.flatMap((item) => {
       if (!item || typeof item !== 'object') return []
       const attribute = item as { trait_type?: unknown; value?: unknown }
-      const trait_type = typeof attribute.trait_type === 'string' ? attribute.trait_type.trim().slice(0, 48) : ''
-      const value = typeof attribute.value === 'string' ? attribute.value.trim().slice(0, 80) : ''
+      const trait_type = typeof attribute.trait_type === 'string' ? stripAiMarkdown(attribute.trait_type).slice(0, 48) : ''
+      const value = typeof attribute.value === 'string' ? stripAiMarkdown(attribute.value).slice(0, 80) : ''
       return trait_type && value ? [{ trait_type, value }] : []
     }).slice(0, 16) : []
     return res.json({ attributes })
@@ -2984,7 +3931,7 @@ app.post('/api/ai/analyze-image', requireWallet, visionUpload.single('image'), a
 
 app.post('/api/ai/verify-collection-artwork', requireWallet, visionUpload.single('image'), async (req, res) => {
   const image = req.file
-  if (!image || !['image/jpeg', 'image/png', 'image/webp'].includes(image.mimetype)) {
+  if (!image || !['image/jpeg', 'image/png', 'image/webp'].includes(image.mimetype) || !mediaSignatureMatches(image.buffer, image.mimetype)) {
     return res.status(400).json({ error: 'Upload a JPEG, PNG, or WebP artwork image (up to 5 MB).' })
   }
   let expected: { trait_type: string; value: string }[]
@@ -3021,22 +3968,22 @@ app.post('/api/ai/verify-collection-artwork', requireWallet, visionUpload.single
     const result = await response.json().catch(() => null) as { result?: { response?: string }; errors?: { message?: string }[]; messages?: { message?: string }[] } | null
     if (!response.ok) return res.status(response.status === 429 ? 429 : 502).json({ error: result?.errors?.[0]?.message || result?.messages?.[0]?.message || 'AI artwork review failed.' })
     const raw = result?.result?.response?.trim() ?? ''
-    const json = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '')
-    const start = json.indexOf('{'), end = json.lastIndexOf('}')
-    const parsed = start >= 0 && end > start ? JSON.parse(json.slice(start, end + 1)) as { checks?: unknown; summary?: unknown } : null
+    const parsed = extractAiJsonObject<{ checks?: unknown; summary?: unknown }>(raw)
     const seen = new Set<string>()
     const checks = Array.isArray(parsed?.checks) ? parsed.checks.flatMap((item) => {
       if (!item || typeof item !== 'object') return []
       const check = item as { trait_type?: unknown; expected?: unknown; status?: unknown; observed?: unknown; note?: unknown }
-      const expectedTrait = expected.find((entry) => entry.trait_type.toLowerCase() === String(check.trait_type ?? '').toLowerCase() && entry.value.toLowerCase() === String(check.expected ?? '').toLowerCase())
+      const modelTraitType = typeof check.trait_type === 'string' ? stripAiMarkdown(check.trait_type) : ''
+      const modelExpected = typeof check.expected === 'string' ? stripAiMarkdown(check.expected) : ''
+      const expectedTrait = expected.find((entry) => entry.trait_type.toLowerCase() === modelTraitType.toLowerCase() && entry.value.toLowerCase() === modelExpected.toLowerCase())
       if (!expectedTrait || !['visible', 'missing', 'uncertain'].includes(String(check.status))) return []
       const key = `${expectedTrait.trait_type.toLowerCase()}\u0000${expectedTrait.value.toLowerCase()}`
       if (seen.has(key)) return []
       seen.add(key)
-      return [{ trait_type: expectedTrait.trait_type, expected: expectedTrait.value, status: check.status, observed: typeof check.observed === 'string' ? check.observed.slice(0, 120) : '', note: typeof check.note === 'string' ? check.note.slice(0, 160) : '' }]
+      return [{ trait_type: expectedTrait.trait_type, expected: expectedTrait.value, status: check.status, observed: typeof check.observed === 'string' ? stripAiMarkdown(check.observed).slice(0, 120) : '', note: typeof check.note === 'string' ? stripAiMarkdown(check.note).slice(0, 160) : '' }]
     }) : []
     if (checks.length !== expected.length || seen.size !== expected.length) return res.status(502).json({ error: 'The vision model returned an incomplete trait review. Try again.' })
-    return res.json({ checks, summary: typeof parsed?.summary === 'string' ? parsed.summary.slice(0, 240) : '' })
+    return res.json({ checks, summary: typeof parsed?.summary === 'string' ? stripAiMarkdown(parsed.summary).slice(0, 240) : '' })
   } catch (error) {
     return res.status(502).json({ error: error instanceof Error && error.name === 'TimeoutError' ? 'Artwork review took too long. Try again.' : 'Could not review the artwork traits.' })
   }
@@ -3160,6 +4107,26 @@ app.post('/api/media/metadata', requireUploadToken, async (req, res) => {
   } catch (error) {
     res.status(502).json({ error: error instanceof Error ? error.message : 'Metadata upload failed' })
   }
+})
+
+// Keep parser and upload failures bounded and non-reflective. Express's default
+// error page can otherwise expose framework details, and multer errors need a
+// predictable 4xx instead of a generic 500.
+app.use('/api', (error: unknown, req: express.Request, res: express.Response, next: express.NextFunction) => {
+  if (res.headersSent) return next(error)
+  const candidate = error && typeof error === 'object' ? error as { status?: unknown; statusCode?: unknown; code?: unknown; name?: unknown } : {}
+  const statusHint = Number(candidate.status ?? candidate.statusCode)
+  const isMulterError = error instanceof multer.MulterError
+  const status = isMulterError && candidate.code === 'LIMIT_FILE_SIZE' || statusHint === 413
+    ? 413
+    : isMulterError || statusHint === 400 || statusHint === 415
+      ? 400
+      : 500
+  const requestId = String(res.getHeader('X-Request-Id') ?? '')
+  const log = JSON.stringify({ event: 'api_request_rejected', requestId, method: req.method, route: req.route?.path ?? '/api/unmatched', status, errorType: typeof candidate.name === 'string' ? candidate.name.slice(0, 80) : 'Error' })
+  if (status >= 500) console.error(log)
+  else console.warn(log)
+  res.status(status).json({ error: status >= 500 ? 'The request could not be completed.' : status === 413 ? 'The request is too large.' : 'The request is invalid.', requestId })
 })
 
 if (!isVercel) startIndexer()

@@ -605,6 +605,18 @@
                       "key": {
                         "vec": [
                           {
+                            "symbol": "NextCollectionOffer"
+                          }
+                        ]
+                      },
+                      "val": {
+                        "u32": 0
+                      }
+                    },
+                    {
+                      "key": {
+                        "vec": [
+                          {
                             "symbol": "NextListing"
                           }
                         ]
@@ -618,6 +630,18 @@
                         "vec": [
                           {
                             "symbol": "NextOffer"
+                          }
+                        ]
+                      },
+                      "val": {
+                        "u32": 0
+                      }
+                    },
+                    {
+                      "key": {
+                        "vec": [
+                          {
+                            "symbol": "NextTraitOffer"
                           }
                         ]
                       },
