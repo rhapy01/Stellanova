@@ -346,8 +346,8 @@ kbd { font-size: 10px; border: 1px solid #D9D9D9; border-radius: 4px; padding: 3
 .notification-browser-alerts > span { display:grid; gap:3px; min-width:0; }
 .notification-browser-alerts b { color:var(--ink); font-size:11px; }
 .notification-browser-alerts small { color:var(--muted); font-size:10px; line-height:1.35; }
-.notification-browser-alerts > button { flex:0 0 auto; min-height:31px; padding:0 11px; border:1px solid #dedee4; border-radius:9px; color:#33333b; background:#fff; font:inherit; font-size:10px; font-weight:700; cursor:pointer; }
-.notification-browser-alerts > button:disabled { opacity:.5; cursor:not-allowed; }
+.notification-browser-alerts__actions > button { flex:0 0 auto; min-height:31px; padding:0 11px; border:1px solid #dedee4; border-radius:9px; color:#33333b; background:#fff; font:inherit; font-size:10px; font-weight:700; cursor:pointer; }
+.notification-browser-alerts__actions > button:disabled { opacity:.5; cursor:not-allowed; }
 .notification-browser-alerts__actions { display:flex; align-items:center; gap:6px; margin-left:auto; flex:0 0 auto; }
 .notification-item { position: relative; display: flex; flex-direction: column; gap: 2px; width: 100%; margin-top: 8px; padding: 9px 11px 9px 16px; border: 1px solid var(--line); border-radius: 9px; background: #fff; text-align: left; font: inherit; color: var(--ink); cursor: pointer; }
 .notification-item.is-unread { background: #faf7ff; border-color: #e4d9f7; }
