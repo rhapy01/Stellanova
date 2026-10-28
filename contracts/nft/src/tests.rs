@@ -1,4 +1,4 @@
-use soroban_sdk::{testutils::{Address as _, Ledger as _}, Address, Env, String, Symbol};
+use soroban_sdk::{testutils::{Address as _, Ledger as _}, Address, BytesN, Env, String, Symbol};
 
 use crate::{NftDrop, NftDropClient};
 
@@ -41,6 +41,22 @@ fn constructor_sets_collection_metadata_and_starts_unrevealed() {
     assert_eq!(h.nft.decimals(), 0);
     assert!(!h.nft.revealed());
     assert_eq!(h.nft.stage_count(), 0);
+}
+
+#[test]
+fn contract_admin_changes_only_after_proposed_admin_accepts() {
+    let h = setup();
+    h.nft.propose_admin(&h.admin, &h.other);
+    assert_eq!(h.nft.admin(), h.admin);
+    h.nft.accept_admin(&h.other);
+    assert_eq!(h.nft.admin(), h.other);
+}
+
+#[test]
+#[should_panic(expected = "caller is not the contract administrator")]
+fn non_admin_cannot_upgrade_contract_wasm() {
+    let h = setup();
+    h.nft.upgrade(&h.other, &BytesN::from_array(&h.env, &[0; 32]));
 }
 
 #[test]
@@ -149,6 +165,24 @@ fn stage_batch_mint_assigns_distinct_ids_and_tracks_owners_and_edition_uri() {
     }
     assert_eq!(h.nft.collection_token_ids(&scope, &0, &10), token_ids);
     assert_eq!(h.nft.collection_token_ids(&scope, &2, &10), soroban_sdk::vec![&h.env, 2u32]);
+}
+
+#[test]
+fn creator_configured_limits_allow_more_than_five_in_one_mint() {
+    let h = setup();
+    let scope = String::from_str(&h.env, "creator-configured-large-mint");
+    configure_public_stage(&h, &scope, 100, 100);
+
+    let mut token_ids = soroban_sdk::Vec::new(&h.env);
+    for _ in 0..10 {
+        let (_, batch) = h.nft.mint_from_stage(&1, &h.buyer, &10);
+        for token_id in batch { token_ids.push_back(token_id); }
+    }
+    assert_eq!(token_ids.len(), 100);
+    assert_eq!(h.nft.owner_of(&9), h.buyer);
+    assert_eq!(h.nft.owner_of(&99), h.buyer);
+    assert_eq!(h.nft.stage_minted(&1), 100);
+    assert_eq!(h.nft.public_stage_minted(&1, &h.buyer), 100);
 }
 
 #[test]

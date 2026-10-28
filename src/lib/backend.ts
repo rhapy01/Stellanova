@@ -949,7 +949,7 @@ export async function updateCollectionReveal(address: string, slug: string, inpu
 export async function fetchCollectionRevealMetadata(address: string, slug: string) {
   const response = await fetch(`/api/collections/${encodeURIComponent(slug)}/reveal/metadata`, { headers: authHeaders(address) })
   if (!response.ok) throw new Error((await response.json().catch(() => null))?.error ?? 'Unable to load token metadata for reveal')
-  return response.json() as Promise<{ tokens: { token_id: number; metadata_uri: string }[] }>
+  return response.json() as Promise<{ tokens: { contract_id: string; token_id: number; metadata_uri: string }[]; contractIds: string[] }>
 }
 
 export async function deleteMintStage(address: string, slug: string, stageId: number) {

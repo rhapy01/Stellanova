@@ -336,7 +336,9 @@ async function sendSocialPage(res: express.Response, metadata: { title: string; 
     ? html.replace(/<link\s+rel="canonical"[^>]*>/i, canonical)
     : html.replace('</head>', `    ${canonical}\n  </head>`)
   const pageSummary = `<main class="crawler-page-summary"><h1>${title}</h1><p>${description}</p><a href="${escapeHtml(metadata.url)}">Open this page in StellaNova</a></main>`
-  html = html.replace(/<div id="root">[\s\S]*?<\/div>/i, `<div id="root">${pageSummary}</div>`)
+  const noScriptSummary = `<noscript>${pageSummary}</noscript>`
+  html = html.replace(/<noscript>[\s\S]*?<\/noscript>/i, noScriptSummary)
+  html = html.replace(/<div id="root">[\s\S]*?<\/div>/i, `<div id="root"></div>`)
   res.type('html').send(html)
 }
 
@@ -2916,12 +2918,17 @@ app.get('/api/collections/:slug/reveal/metadata', requireWallet, async (req, res
     if (!collection) return res.status(404).json({ error: 'Collection not found' })
     if (collection.owner_wallet !== wallet) return res.status(403).json({ error: 'Only the collection creator can reveal token metadata' })
     if (!collection.contract_id) return res.status(409).json({ error: 'This collection has no registered NFT contract' })
-    const tokens = await query<{ token_id: number; metadata_uri: string }[]>(
-      'SELECT token_id, metadata_uri FROM nft_mints WHERE contract_id = ? AND collection_id = ? ORDER BY token_id ASC',
-      [collection.contract_id, slugValue],
+    const tokens = await query<{ contract_id: string; token_id: number; metadata_uri: string }[]>(
+      'SELECT contract_id, token_id, metadata_uri FROM nft_mints WHERE collection_id = ? ORDER BY contract_id ASC, token_id ASC',
+      [slugValue],
     )
     if (tokens.some((token) => !/^https:\/\//i.test(token.metadata_uri))) return res.status(409).json({ error: 'Some minted tokens are still missing metadata. Retry after mint indexing finishes.' })
-    res.json({ tokens })
+    const registeredContracts = await query<{ contract_id: string }[]>(
+      'SELECT contract_id FROM collection_nft_contracts WHERE collection_slug = ? UNION SELECT contract_id FROM nft_mints WHERE collection_id = ? ORDER BY contract_id',
+      [slugValue, slugValue],
+    )
+    const contractIds = [...new Set([collection.contract_id, ...registeredContracts.map((row) => row.contract_id)].filter((id): id is string => Boolean(id)))]
+    res.json({ tokens, contractIds })
   } catch (error) {
     res.status(503).json({ error: error instanceof Error ? error.message : 'Could not load reveal metadata' })
   }
@@ -3028,9 +3035,9 @@ app.get('/api/collections/:slug/mint-history', async (req, res) => {
        FROM verified_nft_mints v
        JOIN nft_mints m ON LOWER(m.contract_id) = LOWER(v.contract_id) AND m.token_id = v.token_id
        LEFT JOIN mint_stages s ON s.id = m.stage_id AND s.collection_id = m.collection_id
-       WHERE m.collection_id = ? AND LOWER(v.contract_id) = LOWER(?)
+       WHERE m.collection_id = ?
        GROUP BY v.minter, s.name, s.kind ORDER BY v.minter, stage_name`,
-      [slugValue, collection.contract_id],
+      [slugValue],
     )
     const historyByWallet = new Map<string, { wallet: string; total_minted: number; last_ledger: number; stages: { stage_name: string; stage_minted: number }[] }>()
     for (const stage of stageRows) {
@@ -3368,8 +3375,13 @@ app.get('/api/collections/:slug/drop/eligibility', async (req, res) => {
         if (wl.length) { onAllowlist = true; customLimit = wl[0].custom_limit; customPrice = wl[0].custom_price }
       }
       const mintTotals = await query<{ stage_minted: number; wallet_minted: number }[]>(
-        'SELECT COALESCE(SUM(CARDINALITY(token_ids)), 0)::int AS stage_minted, COALESCE(SUM(CASE WHEN LOWER(wallet) = LOWER(?) THEN CARDINALITY(token_ids) ELSE 0 END), 0)::int AS wallet_minted FROM stage_mint_events WHERE LOWER(contract_id) = LOWER(?) AND stage_id = ?',
-        [wallet || '', collection.contract_id || '', stage.id],
+        `SELECT COALESCE(SUM(CARDINALITY(token_ids)), 0)::int AS stage_minted,
+                COALESCE(SUM(CASE WHEN LOWER(wallet) = LOWER(?) THEN CARDINALITY(token_ids) ELSE 0 END), 0)::int AS wallet_minted
+         FROM stage_mint_events e
+         WHERE e.stage_id = ? AND LOWER(e.contract_id) IN (
+           SELECT LOWER(contract_id) FROM collection_nft_contracts WHERE collection_slug = ?
+         )`,
+        [wallet || '', stage.id, slugValue],
       )
       const stageMinted = Number(mintTotals[0]?.stage_minted ?? 0)
       const walletMinted = Number(mintTotals[0]?.wallet_minted ?? 0)
@@ -3849,7 +3861,7 @@ app.post('/api/ai/plan-collection-traits', requireWallet, async (req, res) => {
   })()
   const apiToken = process.env.CLOUDFLARE_AI_API_TOKEN?.trim()
   if (!accountId || !apiToken) return res.status(503).json({ error: 'AI trait planning is not configured on this server.' })
-  const instruction = `Plan randomized, visible NFT attributes for an art collection. Collection art direction and creator requirements: ${prompt}. If the creator included a "Required trait categories" list, return exactly those categories in that order and preserve each requested category name exactly. Otherwise make 4 to 7 useful, visually depictable categories (such as Background, Texture, Body, Clothing, Expression, Hair, Eyes when they fit). Return JSON only in this shape: {"categories":[{"name":"Background","options":[{"value":"...","weight":100}]}]}. Each category must have 2 to 5 short distinct values. Use integer weights from 1 to 1000; common values should have higher weights and rare visual variants lower weights. Traits must fit this collection concept and be visible in the artwork. Do not return rarity percentages, names, descriptions, markdown, or explanation.`
+  const instruction = `Plan randomized, visible NFT attributes for an art collection. Collection art direction and creator requirements: ${prompt}. If the creator included a "Required trait categories" list, return exactly those categories in that order and preserve each requested category name exactly. Otherwise choose only useful, visually depictable categories from this consistent title-case vocabulary: Background (scene or setting), Texture (surface finish), Hoodie Color, Skin, Eyes, Mouth, Chest Design, Headwear, Drawstring Color, Body Type, Outfit, Hair, and Pose. Do not use duplicate categories such as Background Color, Clothes, or Body. Return JSON only in this shape: {"categories":[{"name":"Background","options":[{"value":"...","weight":100}]}]}. Each category must have 2 to 5 short distinct values. Use integer weights from 1 to 1000; common values should have higher weights and rare visual variants lower weights. Traits must fit this collection concept and be visible in the artwork. Do not return rarity percentages, names, descriptions, markdown, or explanation.`
   try {
     const response = await fetch(`https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(accountId)}/ai/run/@cf/meta/llama-3.2-11b-vision-instruct`, {
       method: 'POST',
@@ -3904,7 +3916,7 @@ app.post('/api/ai/analyze-image', requireWallet, visionUpload.single('image'), a
   const apiToken = process.env.CLOUDFLARE_AI_API_TOKEN?.trim()
   if (!accountId || !apiToken) return res.status(503).json({ error: 'AI image analysis is not configured on this server.' })
   const imageData = `data:${image.mimetype};base64,${image.buffer.toString('base64')}`
-  const prompt = `Inspect this NFT artwork and produce accurate, concise visual attributes as JSON only, in this exact shape: {"attributes":[{"trait_type":"Background","value":"..."}]}. Identify visible traits such as Background, Texture, Body/Character, Clothing, Mouth/Expression, Hair, Eyes, and other clear visual traits. Include only traits that are actually visible and distinguishable; omit categories that do not apply or cannot be determined. Use short values, do not infer hidden details, and do not include name, edition, rarity, or commentary.`
+  const prompt = `Inspect this NFT artwork and produce accurate, concise visual attributes as JSON only, in this exact shape: {"attributes":[{"trait_type":"Background","value":"..."}]}. Use consistent title-case trait names selected from Background, Texture, Hoodie Color, Skin, Eyes, Mouth, Chest Design, Headwear, Drawstring Color, Body Type, Outfit, Hair, and Pose. Use Background for the scene/setting, Texture for material finish, Hoodie Color for hoodie color, Outfit for clothing type, Skin for skin appearance, and Body Type for build. Include only traits that are actually visible and distinguishable; omit categories that do not apply or cannot be determined. Use short values, do not infer hidden details, and do not include name, edition, rarity, or commentary.`
   try {
     const response = await fetch(`https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(accountId)}/ai/run/@cf/meta/llama-3.2-11b-vision-instruct`, {
       method: 'POST',

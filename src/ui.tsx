@@ -1,6 +1,6 @@
 import { useState, type ButtonHTMLAttributes, type ReactNode } from 'react'
 
-export type IconName = 'home' | 'compass' | 'heart' | 'thumbUp' | 'thumbDown' | 'bookmark' | 'user' | 'search' | 'plus' | 'arrow' | 'wallet' | 'filter' | 'grid' | 'layers' | 'pixel' | 'activity' | 'bell' | 'check' | 'close' | 'spark' | 'share' | 'copy' | 'more' | 'chevron' | 'settings' | 'comment' | 'image'
+export type IconName = 'home' | 'compass' | 'heart' | 'thumbUp' | 'thumbDown' | 'bookmark' | 'user' | 'search' | 'plus' | 'arrow' | 'wallet' | 'filter' | 'grid' | 'layers' | 'pixel' | 'activity' | 'bell' | 'check' | 'close' | 'spark' | 'share' | 'copy' | 'more' | 'chevron' | 'settings' | 'comment' | 'image' | 'briefcase' | 'gallery' | 'palette' | 'chart'
 
 const paths: Record<IconName, ReactNode> = {
   home: <><path d="m3 10 9-7 9 7v10a1 1 0 0 1-1 1h-5v-6H9v6H4a1 1 0 0 1-1-1Z" /></>,
@@ -30,6 +30,10 @@ const paths: Record<IconName, ReactNode> = {
   settings: <><circle cx="12" cy="12" r="3" /><path d="m19.4 15 .1.1 1.4 1.1-1.4 2.4-1.7-.7a8 8 0 0 1-1.5.9l-.3 1.8h-2.8l-.3-1.8a8 8 0 0 1-1.5-.9l-1.7.7-1.4-2.4 1.4-1.1a7 7 0 0 1 0-1.8l-1.4-1.1 1.4-2.4 1.7.7a8 8 0 0 1 1.5-.9l.3-1.8h2.8l.3 1.8a8 8 0 0 1 1.5.9l1.7-.7 1.4 2.4-1.4 1.1a7 7 0 0 1 0 1.8Z" transform="translate(-1 -1) scale(1.08)" /></>,
   comment: <path d="M20 11.5a7.5 7.5 0 0 1-7.5 7.5H5l1.9-3.1A7.5 7.5 0 1 1 20 11.5Z" />,
   image: <><rect x="3" y="4" width="18" height="16" rx="2" /><circle cx="8.5" cy="9" r="1.5" /><path d="m21 15-5-5L5 20" /></>,
+  briefcase: <><rect x="3" y="7" width="18" height="14" rx="2" /><path d="M8 7V5a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2M3 12h18M10 12v2h4v-2" /></>,
+  gallery: <><path d="M3 5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z" /><path d="M7 17h10M7 14l3-3 2 2 3-4 2 5" /><circle cx="8" cy="8" r="1" /></>,
+  palette: <><path d="M12 3a9 9 0 1 0 0 18h1.2a2 2 0 0 0 1.5-3.3 1.8 1.8 0 0 1 1.4-3h1.4A3.5 3.5 0 0 0 21 11.2 8.2 8.2 0 0 0 12 3Z" /><circle cx="7.5" cy="11" r="1" /><circle cx="10" cy="7.5" r="1" /><circle cx="15" cy="8" r="1" /></>,
+  chart: <><path d="M4 20V10M10 20V4M16 20v-7M22 20H2" /></>,
 }
 
 export function Icon({ name, size = 20, strokeWidth = 1.8 }: { name: IconName; size?: number; strokeWidth?: number }) {

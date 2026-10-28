@@ -81,6 +81,11 @@ export async function ensureSchema() {
     await db.query(`CREATE TABLE IF NOT EXISTS nftgram_schema (version INT PRIMARY KEY, applied_at TIMESTAMPTZ DEFAULT now())`)
     const currentSchema = await db.query<{ version: number }>('SELECT COALESCE(MAX(version), 0)::int AS version FROM nftgram_schema')
     const currentVersion = Number(currentSchema.rows[0]?.version ?? 0)
+    // A collection may be associated with both its legacy NFT contract and a
+    // replacement contract. Keep this registry available on databases that
+    // already reached the current schema version before the table was added.
+    await db.query(`CREATE TABLE IF NOT EXISTS collection_nft_contracts (collection_slug VARCHAR(160) NOT NULL, contract_id VARCHAR(56) NOT NULL, is_active BOOLEAN NOT NULL DEFAULT FALSE, created_at TIMESTAMPTZ NOT NULL DEFAULT now(), PRIMARY KEY (collection_slug, contract_id))`)
+    if (currentVersion > 0) await db.query(`INSERT INTO collection_nft_contracts (collection_slug, contract_id, is_active) SELECT slug, contract_id, TRUE FROM collections WHERE contract_id IS NOT NULL ON CONFLICT (collection_slug, contract_id) DO NOTHING`)
     // Referral attribution is additive and must exist even on databases that
     // already reached the latest numbered schema migration.
     await db.query(`CREATE TABLE IF NOT EXISTS referral_codes (wallet_address VARCHAR(56) PRIMARY KEY, code VARCHAR(16) NOT NULL UNIQUE, created_at TIMESTAMPTZ NOT NULL DEFAULT now())`)
@@ -256,6 +261,8 @@ export async function ensureSchema() {
       `CREATE TABLE IF NOT EXISTS collections (id BIGSERIAL PRIMARY KEY, owner_wallet VARCHAR(56) NOT NULL, slug VARCHAR(160) NOT NULL, name VARCHAR(160) NOT NULL, symbol VARCHAR(20) NOT NULL, description VARCHAR(1000) NOT NULL DEFAULT '', cover VARCHAR(1024) NOT NULL DEFAULT '', is_verified BOOLEAN NOT NULL DEFAULT FALSE, verification_status VARCHAR(16) NOT NULL DEFAULT 'pending', verified_by VARCHAR(56), verified_at TIMESTAMPTZ, contract_id VARCHAR(56), created_at TIMESTAMPTZ DEFAULT now(), UNIQUE (slug))`,
       `CREATE INDEX IF NOT EXISTS collections_owner ON collections (owner_wallet)`,
       `ALTER TABLE collections ADD COLUMN IF NOT EXISTS contract_id VARCHAR(56)`,
+      `CREATE TABLE IF NOT EXISTS collection_nft_contracts (collection_slug VARCHAR(160) NOT NULL, contract_id VARCHAR(56) NOT NULL, is_active BOOLEAN NOT NULL DEFAULT FALSE, created_at TIMESTAMPTZ NOT NULL DEFAULT now(), PRIMARY KEY (collection_slug, contract_id))`,
+      `INSERT INTO collection_nft_contracts (collection_slug, contract_id, is_active) SELECT slug, contract_id, TRUE FROM collections WHERE contract_id IS NOT NULL ON CONFLICT (collection_slug, contract_id) DO NOTHING`,
       `ALTER TABLE collections ADD COLUMN IF NOT EXISTS total_supply INT`,
       `ALTER TABLE collections ADD COLUMN IF NOT EXISTS website_url VARCHAR(500)`,
       `ALTER TABLE collections ADD COLUMN IF NOT EXISTS social_links JSONB NOT NULL DEFAULT '{}'::jsonb`,

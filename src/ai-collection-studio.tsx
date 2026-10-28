@@ -26,27 +26,70 @@ export type TransferAsset = {
   rarityScore?: number;
 };
 const TRAIT_PRESETS = [
-  { name: `Background color`, examples: `Midnight blue, sunset orange, emerald green, lavender, cream`, values: [`Midnight blue`, `Sunset orange`, `Emerald green`, `Lavender`, `Cream`] },
-  { name: `Texture`, examples: `Matte, glossy, metallic, holographic, speckled`, values: [`Matte`, `Glossy`, `Metallic`, `Holographic`, `Speckled`] },
-  { name: `Body`, examples: `Black, cream, white, warm tan, deep brown`, values: [`Black`, `Cream`, `White`, `Warm tan`, `Deep brown`] },
-  { name: `Clothes`, examples: `Dress, sportswear, robe, streetwear, punk jacket`, values: [`Dress`, `Sportswear`, `Robe`, `Streetwear`, `Punk jacket`] },
-  { name: `Mouth`, examples: `Happy smile, sad frown, angry, neutral, surprised`, values: [`Happy smile`, `Sad frown`, `Angry`, `Neutral`, `Surprised`] },
-  { name: `Hair`, examples: `Punk spikes, long braids, low cut, curly, silver bob`, values: [`Punk spikes`, `Long braids`, `Low cut`, `Curly`, `Silver bob`] },
-  { name: `Eyes`, examples: `Calm, angry, starry, closed, glowing`, values: [`Calm`, `Angry`, `Starry`, `Closed`, `Glowing`] },
+  { name: `Background`, values: [[`Night sky`,10],[`Bamboo grove`,10],[`Paper studio`,10],[`Lilac clouds`,10],[`Peach sunset`,10],[`Moonlit forest`,10],[`Misty mountains`,10],[`Ocean dusk`,10],[`Rose garden`,10],[`Starfield`,10]] },
+  { name: `Texture`, values: [[`Matte`,5.9],[`Glossy`,5.9],[`Metallic`,5.9],[`Holographic`,5.9],[`Speckled`,5.9],[`Canvas`,5.9],[`Linen`,5.9],[`Woodgrain`,5.9],[`Marble`,5.9],[`Stone`,5.9],[`Crystal`,5.9],[`Velvet`,5.9],[`Carbon fiber`,5.9],[`Brushed metal`,5.9],[`Ceramic glaze`,5.9],[`Embossed`,5.9],[`Iridescent`,5.6]] },
+  { name: `Hoodie Color`, values: [[`Charcoal`,13.7],[`Cream`,11.1],[`Cobalt`,10.2],[`Lavender`,9.8],[`Forest`,9.8],[`Crimson`,9.3],[`Orange`,8],[`Pink`,7.9],[`Teal`,6.9],[`Olive`,6],[`White`,4.6],[`Camo`,1.8],[`Gold`,0.9]] },
+  { name: `Skin`, values: [[`Tan`,20.7],[`Light`,18.8],[`Brown`,16.8],[`Deep`,16.5],[`Panda`,10.5],[`Zombie`,7.2],[`Alien`,4.8],[`Robot`,3.8],[`Shadow`,1]] },
+  { name: `Eyes`, values: [[`Normal`,31],[`Sleepy`,16.1],[`Shades`,14.7],[`Wide`,14.1],[`3D Glasses`,7.7],[`Wink`,7],[`VR Visor`,6.1],[`Laser`,2.5],[`Diamond`,0.9]] },
+  { name: `Mouth`, values: [[`Neutral`,30.4],[`Smile`,22.3],[`Face Mask`,11.9],[`Toothpick`,11.2],[`Frown`,10.8],[`Bubblegum`,7.5],[`Fangs`,4.7],[`Gold Grill`,1.2]] },
+  { name: `Chest Design`, values: [[`Plain`,30.6],[`Bamboo`,17.1],[`BNB`,12.4],[`Heart`,12],[`Star`,10.6],[`Bolt`,9.5],[`Agent`,5.7],[`Crown`,2.1]] },
+  { name: `Headwear`, values: [[`None`,45.1],[`Headphones`,17.6],[`Cat Ears`,10.4],[`Beanie Pom`,10.1],[`Horns`,6.4],[`Antenna`,5.8],[`Halo`,3.9],[`Crown`,0.7]] },
+  { name: `Drawstring Color`, values: [[`White`,41.1],[`Black`,25.9],[`Neon`,14.2],[`Red`,11],[`Gold`,7.8]] },
+  { name: `Body Type`, values: [[`Slim`,16.7],[`Athletic`,16.7],[`Stocky`,16.7],[`Round`,16.7],[`Tall`,16.6],[`Compact`,16.6]] },
+  { name: `Outfit`, values: [[`Dress`,20],[`Sportswear`,20],[`Robe`,20],[`Streetwear`,20],[`Punk jacket`,20]] },
+  { name: `Hair`, values: [[`Punk spikes`,20],[`Long braids`,20],[`Low cut`,20],[`Curly`,20],[`Silver bob`,20]] },
+  { name: `Pose`, values: [[`Standing`,20],[`Seated`,20],[`Walking`,20],[`Arms crossed`,20],[`Waving`,20]] },
 ];
 function defaultGenerationTraits() {
-  return TRAIT_PRESETS.map(category => ({ id: crypto.randomUUID(), name: category.name, options: [] }));
+  return TRAIT_PRESETS.map(category => ({ id: crypto.randomUUID(), name: category.name, enabled: true, options: category.values.map(([value, weight]) => ({ id: crypto.randomUUID(), value, weight })) }));
 }
 function collectionSymbol(name) {
   return String(name ?? ``).toUpperCase().replace(/[^A-Z0-9]/g, ``).slice(0, 20);
 }
 function cleanDefaultTraitExamples(categories) {
-  return categories.map(category => {
-    const preset = TRAIT_PRESETS.find(item => item.name === category.name);
-    const options = category.options ?? [];
-    const areOnlyExamples = preset && options.length === preset.values.length && preset.values.every((value, index) => options[index]?.value?.toLowerCase() === value.toLowerCase());
-    return areOnlyExamples ? { ...category, options: [] } : category;
+  const normalize = value => String(value ?? ``).trim().toLowerCase();
+  const aliases = new Map([
+    [`bg`, `Background`], [`background`, `Background`], [`background color`, `Background`],
+    [`hoodie`, `Hoodie Color`], [`hoodie color`, `Hoodie Color`], [`clothes`, `Outfit`], [`clothing`, `Outfit`], [`outfit`, `Outfit`],
+    [`body`, `Skin`], [`skin`, `Skin`], [`body type`, `Body Type`],
+    [`eyes`, `Eyes`], [`mouth`, `Mouth`], [`texture`, `Texture`], [`chest`, `Chest Design`], [`chest design`, `Chest Design`],
+    [`headwear`, `Headwear`], [`drawstrings`, `Drawstring Color`], [`drawstring color`, `Drawstring Color`], [`hair`, `Hair`], [`pose`, `Pose`],
+  ]);
+  const canonicalName = category => aliases.get(normalize(category.name)) ?? null;
+  const savedByName = new Map();
+  const customCategories = [];
+  for (const category of categories) {
+    const name = canonicalName(category);
+    if (!name) { customCategories.push(category); continue; }
+    const key = normalize(name);
+    const saved = savedByName.get(key);
+    if (!saved) savedByName.set(key, { ...category, name, options: [...(category.options ?? [])], enabled: category.enabled !== false });
+    else {
+      const existingValues = new Set(saved.options.map(option => normalize(option.value)));
+      for (const option of category.options ?? []) {
+        const key = normalize(option.value);
+        if (!existingValues.has(key)) { saved.options.push(option); existingValues.add(key); }
+      }
+      saved.enabled = saved.enabled && category.enabled !== false;
+    }
+  }
+  const mergedPresets = TRAIT_PRESETS.map(preset => {
+    const saved = savedByName.get(normalize(preset.name));
+    const options = [...(saved?.options ?? [])];
+    const savedValues = new Set(options.map(option => normalize(option.value)));
+    for (const [value, weight] of preset.values) {
+      if (!savedValues.has(normalize(value))) options.push({ id: crypto.randomUUID(), value, weight });
+    }
+    // Background and body values from the old presets described palettes, not
+    // settings/body types. Preserve them visibly but keep them out of generation.
+    if (preset.name === `Background` || preset.name === `Body Type`) {
+      const oldCategoryNames = preset.name === `Background` ? new Set([`background`, `background color`, `bg`]) : new Set([`body`]);
+      const oldValues = new Set(categories.filter(category => oldCategoryNames.has(normalize(category.name)) && category.name !== preset.name).flatMap(category => (category.options ?? []).map(option => normalize(option.value))));
+      for (const option of options) if (oldValues.has(normalize(option.value)) && !preset.values.some(([value]) => normalize(value) === normalize(option.value))) option.weight = 0;
+    }
+    return { id: saved?.id ?? crypto.randomUUID(), name: preset.name, enabled: saved?.enabled ?? true, options };
   });
+  return mergedPresets.concat(customCategories);
 }
 var cr = {
     mode: `characters`,
@@ -377,6 +420,7 @@ function br({ file: e, name: t }) {
 }
 function generationAssignments(categories, count) {
   if (!categories.length) return Array.from({ length: count }, () => []);
+  if (categories.some(category => !category.name.trim())) throw Error(`Give every trait category a name before generating artwork.`);
   if (categories.some(category => !category.options.some(option => option.value.trim() && option.weight > 0))) throw Error(`Every trait category needs at least one named value with a weight above zero.`);
   const options = categories.map(category => category.options.filter(option => option.value.trim() && option.weight > 0));
   const capacity = options.reduce((total, values) => total * values.length, 1);
@@ -463,25 +507,37 @@ function SupplyRarityEditor({ supply, mix, onChange }) {
   return <section className="ai-collection-supply-rarity"><div><span className="eyebrow">SUPPLY RARITY MIX</span><p>Generate up to 8 master artworks, then reuse them across your full supply. The rarest masters fill the high tier; edition metadata is expanded to match these percentages.</p></div><div className="ai-collection-rarity-fields">{[[`high`, `High rarity`], [`medium`, `Medium rarity`], [`common`, `Common rarity`]].map(([key, label]) => <label key={key}>{label}<span><input type="number" min="0" max="100" value={mix[key] ?? ``} onChange={event => setPercent(key, event.target.value)} onBlur={() => commitPercent(key)} />%</span><small>{counts[key].toLocaleString()} editions</small></label>)}</div><small className={total === 100 ? `ai-collection-rarity-total` : `ai-collection-rarity-total is-invalid`}>{total}% total · {total === 100 ? `${counts.high.toLocaleString()} high · ${counts.medium.toLocaleString()} medium · ${counts.common.toLocaleString()} common out of ${Number(supply).toLocaleString()}` : `Set percentages to add up to 100%.`}</small></section>;
 }
 function PromptTraitsEditor({ categories, onChange }) {
-  const [drafts, setDrafts] = U.useState(() => Object.fromEntries(categories.map(category => [category.id, category.options.map(option => option.value).join(`, `)])));
-  const [name, setName] = U.useState(``), [values, setValues] = U.useState(``);
-  const addCategory = () => {
-    const category = name.trim(), traits = [...new Set(values.split(/[,\n]+/).map(value => value.trim()).filter(Boolean))];
-    if (!category || traits.length < 2 || categories.some(item => item.name.toLowerCase() === category.toLowerCase())) return;
-    onChange([...categories, { id: crypto.randomUUID(), name: category, options: traits.map(value => ({ id: crypto.randomUUID(), value, weight: 100 })) }]);
-    setName(``); setValues(``);
-  };
+  const [newValues, setNewValues] = U.useState({});
+  const [newCategoryName, setNewCategoryName] = U.useState(``);
+  const [newCategoryValues, setNewCategoryValues] = U.useState(``);
   const update = next => onChange(categories.map(item => item.id === next.id ? next : item));
-  const editValues = (category, raw) => {
-    const nextValues = [...new Set(raw.split(`,`).map(value => value.trim()).filter(Boolean))];
-    update({ ...category, options: nextValues.map(value => category.options.find(item => item.value.toLowerCase() === value.toLowerCase()) ?? { id: crypto.randomUUID(), value, weight: 100 }) });
+  const addValue = category => {
+    const value = String(newValues[category.id] ?? ``).trim();
+    if (!value || category.options.some(option => option.value.toLowerCase() === value.toLowerCase())) return;
+    update({ ...category, options: [...category.options, { id: crypto.randomUUID(), value, weight: 100 }] });
+    setNewValues(current => ({ ...current, [category.id]: `` }));
   };
+  const toggleCategory = category => update({ ...category, enabled: category.enabled === false });
+  const addCustomCategory = event => {
+    event.preventDefault();
+    const name = newCategoryName.trim();
+    const values = [...new Set(newCategoryValues.split(/[\n,]+/).map(value => value.trim()).filter(Boolean))];
+    if (!name || !values.length || categories.some(category => category.name.toLowerCase() === name.toLowerCase())) return;
+    onChange([...categories, { id: crypto.randomUUID(), name, enabled: true, options: values.map(value => ({ id: crypto.randomUUID(), value, weight: 100 })) }]);
+    setNewCategoryName(``);
+    setNewCategoryValues(``);
+  };
+  const updateWeight = (category, option, weight) => update({ ...category, options: category.options.map(item => item.id === option.id ? { ...item, weight: Math.max(0, Number(weight) || 0) } : item) });
+  const adjustWeight = (category, option, delta) => updateWeight(category, option, Math.max(0, Math.min(100, (Number(option.weight) || 0) + delta)));
   return <div className="ai-collection-prompt-traits">
-    <div><span className="eyebrow">TRAITS</span><p>Enter options separated by commas. The studio picks a combination for each artwork and adds it to the image prompt and NFT metadata.</p></div>
-    <div className="ai-collection-trait-list">{categories.map(category => <label className="ai-collection-trait-row" key={category.id}>
-      <span>{category.name}</span>
-      <input value={drafts[category.id] ?? category.options.map(option => option.value).join(`, `)} onChange={event => { const raw = event.target.value; setDrafts(current => ({ ...current, [category.id]: raw })); editValues(category, raw); }} placeholder={TRAIT_PRESETS.find(item => item.name === category.name)?.examples ?? `e.g. Silver, Gold, Crystal`} aria-label={`${category.name} trait values`} />
-    </label>)}</div>
+    <div><span className="eyebrow">TRAITS & RARITY WEIGHTS</span><p>Use +/− beside a category to enable or disable the whole trait while keeping its values and weights. Use +/− beside a value to adjust its weight; weight 0 excludes that value from generation and metadata.</p></div>
+    <div className="ai-collection-trait-list">{categories.map(category => <details className={`ai-collection-trait-row${category.enabled === false ? ` is-category-disabled` : ``}`} key={category.id}>
+      <summary><b>{category.name}</b><span>{category.enabled === false ? `Off · ` : ``}{category.options.length} values</span><button type="button" className="ai-collection-trait-category-toggle" aria-label={`${category.enabled === false ? `Enable` : `Disable`} ${category.name} trait`} title={`${category.enabled === false ? `Enable` : `Disable`} trait`} aria-pressed={category.enabled !== false} onClick={event => { event.preventDefault(); event.stopPropagation(); toggleCategory(category); }}>{category.enabled === false ? `+` : `−`}</button></summary>
+      <div className="ai-collection-trait-values-list" aria-label={`${category.name} values`}>{category.options.map(option => <div className={`ai-collection-trait-value-row${Number(option.weight) <= 0 ? ` is-excluded` : ``}`} key={option.id}><span title={option.value}>{option.value}</span><div className="ai-collection-trait-weight-control"><button type="button" aria-label={`Decrease ${option.value} weight`} title="Decrease weight" disabled={Number(option.weight) <= 0} onClick={() => adjustWeight(category, option, -1)}>−</button><label><small>{Number(option.weight) <= 0 ? `Excluded` : `Weight`}</small><input type="number" min="0" max="100" step="0.1" value={option.weight} aria-label={`${option.value} weight`} onChange={event => updateWeight(category, option, event.target.value)} /></label><button type="button" aria-label={`Increase ${option.value} weight`} title="Increase weight" disabled={Number(option.weight) >= 100} onClick={() => adjustWeight(category, option, 1)}>+</button></div><button type="button" className="ai-collection-trait-value-remove" aria-label={`Delete ${option.value} from ${category.name}`} title={`Delete ${option.value}`} onClick={() => update({ ...category, options: category.options.filter(item => item.id !== option.id) })}>×</button></div>)}</div>
+      <form className="ai-collection-trait-value-add" onSubmit={event => { event.preventDefault(); addValue(category); }}><input value={newValues[category.id] ?? ``} onChange={event => setNewValues(current => ({ ...current, [category.id]: event.target.value }))} placeholder={`Add a ${category.name.toLowerCase()} value`} aria-label={`New ${category.name} value`} /><button type="submit" aria-label={`Add ${category.name} value`} title="Add value" disabled={!String(newValues[category.id] ?? ``).trim()}>+</button></form>
+      { !TRAIT_PRESETS.some(preset => preset.name === category.name) && <button type="button" className="ai-collection-trait-remove-category" onClick={() => onChange(categories.filter(item => item.id !== category.id))}>× Delete custom category</button> }
+    </details>)}</div>
+    <details className="ai-collection-trait-custom-category"><summary>+ Add custom category</summary><form className="ai-collection-trait-value-add" onSubmit={addCustomCategory}><input value={newCategoryName} onChange={event => setNewCategoryName(event.target.value)} placeholder="Category name" aria-label="Custom category name" /><input value={newCategoryValues} onChange={event => setNewCategoryValues(event.target.value)} placeholder="Values, separated by commas" aria-label="Custom category values" /><button type="submit" title="Add custom category" disabled={!newCategoryName.trim() || !newCategoryValues.trim()}>+</button></form></details>
   </div>;
 }
 function xr({
@@ -615,6 +671,29 @@ function xr({
         o(e),
         w(`Draft saved on this device.`),
         window.setTimeout(() => w(``), 2500));
+    },
+    clearManageSetup = async () => {
+      if (!window.confirm(`Clear the AI Collection Manage setup and its saved draft on this device? This will not archive or delete any collection already created on Stellar.`)) return;
+      try {
+        await deleteStudioDraft(`ai-collection`);
+        o({ ...cr, generationTraits: defaultGenerationTraits() });
+        c(`manage`);
+        u(``);
+        m(0);
+        S(``);
+        b(`Manage setup cleared. Your completed collection archive was not changed.`);
+      } catch (error) {
+        S(error instanceof Error ? error.message : `Could not clear the saved collection setup.`);
+      }
+    },
+    openStudioTab = tab => {
+      c(tab);
+      if (tab !== `archive` || !walletAddress) return;
+      setArchiveLoading(true);
+      fetchCreatorArchive(walletAddress)
+        .then(items => setArchiveItems(items))
+        .catch(error => S(error instanceof Error ? error.message : `Could not load your collection archive from the database.`))
+        .finally(() => setArchiveLoading(false));
     },
     ie = () => {
       let e = D.trim();
@@ -1004,34 +1083,11 @@ function xr({
         S(`Add a collection name before generating its artwork.`);
         return;
       }
-      let count = Math.min(8, Math.max(1, a.count)), assignments, categories = (a.generationTraits ?? []).map(category => ({ ...category, options: (category.options ?? []).filter(option => option.value.trim() && option.weight > 0) })), failures = [];
-      (v(!0), S(``), b(`Preparing the collection trait plan…`));
+      let count = Math.min(8, Math.max(1, a.count)), assignments, categories = (a.generationTraits ?? []).filter(category => category.enabled !== false).map(category => ({ ...category, options: (category.options ?? []).filter(option => option.value.trim() && option.weight > 0) })).filter(category => category.options.length), failures = [];
+      (v(!0), S(``), b(`Preparing trait combinations…`));
       trackProductEvent(`artwork_generation_started`, { studio: `ai-collection`, quantity: count });
       let r = [];
       try {
-        const emptyCategories = categories.filter(category => !category.options.length);
-        if (!categories.length || emptyCategories.length) {
-          const categoryPrompt = emptyCategories.length
-            ? `${n}\nRequired trait categories: ${JSON.stringify(emptyCategories.map(category => category.name))}. Return only these categories, keep each category name exactly as written, and create visible trait values that fit the collection.`
-            : n;
-          const plannedCategories = await planTraits(categoryPrompt, count);
-          if (!Array.isArray(plannedCategories) || plannedCategories.length < 1) throw Error(`The AI did not return a usable collection trait plan. Try again.`);
-          if (!categories.length) categories = plannedCategories;
-          else {
-            const plannedByName = new Map(plannedCategories.map(category => [category.name.trim().toLowerCase(), category]));
-            const remaining = [...plannedCategories];
-            categories = categories.map(category => {
-              if (category.options.length) return category;
-              const planned = plannedByName.get(category.name.trim().toLowerCase()) ?? remaining[0];
-              if (!planned) throw Error(`The AI could not fill the ${category.name} trait category. Try again.`);
-              remaining.splice(remaining.indexOf(planned), 1);
-              return { ...category, options: planned.options };
-            });
-          }
-          if (categories.length < 2 || categories.some(category => !category.options.length)) throw Error(`The AI did not return enough usable collection traits. Try again.`);
-          o(current => ({ ...current, generationTraits: categories }));
-          await Lt(`ai-collection`, { ...a, generationTraits: categories });
-        }
         assignments = generationAssignments(categories, count);
         for (let i = 0; i < count; i += 1) {
           b(
@@ -1041,9 +1097,17 @@ function xr({
               ? ` Crisp pixel art, consistent pixel grid, sharp square pixels, no antialiasing.`
               : ` Polished digital illustration, square composition.`,
             attributes = assignments[i].map(({ category, option }) => ({ trait_type: category.name, value: option.value })),
-            imageTraitLabels = { [`Background color`]: `background color palette`, Texture: `surface finish`, Body: `character color palette`, Clothes: `outfit`, Mouth: `facial expression`, Hair: `hairstyle`, Eyes: `eye expression` },
-            traitPrompt = attributes.length ? `Depict these exact visual design choices in the artwork: ${assignments[i].map(({ category, option }) => `${imageTraitLabels[category.name] ?? category.name}: ${option.value}`).join(`; `)}. The character is fully dressed in the specified outfit. Treat every choice as a required part of the design.` : `Vary the background palette, surface finish, character palette, outfit, facial expression, hairstyle, and eye expression naturally across the collection where they fit the artwork.`;
-          const requestPrompt = `${n}. Create a distinct collectible variation ${i + 1} of ${count} for one cohesive NFT collection. Keep the same central character and art direction. ${s} ${traitPrompt}`;
+            imageTraitLabels = { BACKGROUND: `scene or setting behind the subject`, TEXTURE: `visible material texture or surface finish`, "HOODIE COLOR": `hoodie color`, SKIN: `subject skin tone or skin appearance`, EYES: `eye style or eyewear`, MOUTH: `mouth expression or accessory`, "CHEST DESIGN": `chest emblem or graphic`, HEADWEAR: `headwear`, "DRAWSTRING COLOR": `hoodie drawstring color`, "BODY TYPE": `subject build or body type`, OUTFIT: `clothing type and outfit style`, HAIR: `hairstyle`, POSE: `subject posture or pose` },
+            assignedTraitInstructions = assignments[i].map(({ category, option }) => {
+              const categoryName = String(category.name ?? ``).trim().toUpperCase();
+              const label = imageTraitLabels[categoryName] ?? `${category.name} visual detail`;
+              if (categoryName === `TEXTURE`) return `${label}: ${option.value}. Render this as a clearly visible physical surface property on the relevant subject or object (for example its grain, sheen, reflectivity, or pattern), not as text, a label, or an unrelated overlay`;
+              return `${label}: ${option.value}`;
+            }),
+            textureInstruction = assignments[i].some(({ category }) => String(category.name ?? ``).trim().toUpperCase() === `TEXTURE`) ? ` Show the texture clearly on its relevant material surface.` : ``,
+            traitPrompt = attributes.length ? `Variation ${i + 1} of ${count}. Keep the same subject, composition, and cohesive collection art direction. Render every assigned trait visibly: ${assignedTraitInstructions.join(`; `)}. Do not print trait names or add labels.${textureInstruction}` : `Create a distinct variation while keeping the collection's subject, composition, and art direction consistent.`;
+          const requestPrompt = `${n}\n${s}\n${traitPrompt}`;
+          if (requestPrompt.length > 2048) throw new Error(`This prompt becomes ${requestPrompt.length} characters after adding the selected traits; the image model allows 2,048. Shorten the art direction or disable a trait category/value.`);
           let c;
           try {
             c = await e(requestPrompt);
@@ -1541,7 +1605,6 @@ function xr({
         children: [
           [`manage`, `Manage`],
           [`preview`, `Review`],
-          [`settings`, `Metadata`],
           [`launch`, `Publish`],
           [`archive`, `Archive${archiveItems.length ? ` · ${archiveItems.length}` : ``}`],
         ].map(([e, t]) =>
@@ -1549,7 +1612,7 @@ function xr({
             `button`,
             {
               className: s === e ? `is-active` : ``,
-              onClick: () => c(e),
+              onClick: () => openStudioTab(e),
               children: [
                 t,
                 e === `preview` && a.candidates.length
@@ -1582,6 +1645,10 @@ function xr({
             (0, W.jsxs)(`section`, {
               className: `ai-collection-setup`,
               children: [
+                (0, W.jsxs)(`div`, { className: `ai-collection-manage-actions`, children: [
+                  (0, W.jsx)(`p`, { children: `Clear this preparation without adding it to your collection archive.` }),
+                  (0, W.jsx)(K, { variant: `outline`, onClick: () => void clearManageSetup(), disabled: h || _, children: `Clear setup` }),
+                ] }),
                 (0, W.jsxs)(`div`, {
                   className: `ai-collection-fields`,
                   children: [
@@ -1748,14 +1815,14 @@ function xr({
                         }),
                         (0, W.jsx)(`textarea`, {
                           rows: 4,
-                          maxLength: 900,
+                          maxLength: 1500,
                           value: a.prompt,
                           onChange: e =>
                             o(t => ({ ...t, prompt: e.target.value })),
                           placeholder: `A friendly moon fox explorer with luminous details, a midnight-blue and lavender palette…`,
                         }),
-                        (0, W.jsx)(`small`, {
-                          children: `AI fills any blank trait categories, assigns a unique weighted trait mix, generates each image, then checks that image against its assigned traits.`,
+                        (0, W.jsxs)(`small`, {
+                          children: [`${a.prompt.length}/1,500 characters. `, `Enabled weighted values are added to each generation prompt and checked after generation. Disabled categories and values at 0 are skipped.`],
                         }),
                       ],
                     }),
@@ -2929,28 +2996,7 @@ function xr({
             }),
           ],
         }),
-      s === `settings` &&
-        (0, W.jsxs)(`section`, {
-          className: `ai-collection-settings`,
-          children: [
-            (0, W.jsxs)(`div`, {
-              children: [
-                (0, W.jsx)(`span`, { className: `eyebrow`, children: `AUTOMATIC METADATA` }),
-                (0, W.jsx)(`h2`, { children: `Metadata is created for you` }),
-                (0, W.jsx)(`p`, { children: `No templates to fill in. Each NFT gets its collection name and edition number, your collection description, its generated traits, and rarity.` }),
-              ],
-            }),
-            (0, W.jsxs)(`div`, {
-              className: `ai-collection-auto-metadata`,
-              children: [
-                (0, W.jsxs)(`p`, { children: [(0, W.jsx)(`b`, { children: `Name` }), ` · ${a.collectionName || `Collection`} #1, #2, #3…`] }),
-                (0, W.jsxs)(`p`, { children: [(0, W.jsx)(`b`, { children: `Description` }), ` · Uses the collection description from Manage.`] }),
-                (0, W.jsxs)(`p`, { children: [(0, W.jsx)(`b`, { children: `Attributes` }), ` · Generated from each artwork’s assigned traits and rarity.`] }),
-                (0, W.jsxs)(`p`, { children: [(0, W.jsx)(`b`, { children: `Reveal` }), ` · After creating the collection, open its collection page. The creator’s Artwork reveal control is above the mint timeline.`] }),
-              ],
-            }),
-          ],
-        }),      s === `archive` &&
+      s === `archive` &&
         (0, W.jsxs)(`section`, {
           className: `ai-collection-archive`,
           children: [

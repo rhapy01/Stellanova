@@ -1,8 +1,38 @@
 #![no_std]
 
 use soroban_sdk::{
-    contract, contractimpl, contracttype, token, Address, Bytes, Env, String, Symbol, Vec,
+    contract, contractimpl, contracttype, token, Address, Bytes, BytesN, ContractExecutable, Env, IntoVal, String, Symbol, TryFromVal, Val, Vec,
 };
+
+
+// Keep high-cardinality NFT state in persistent entries. Instance storage is limited
+// to 64 KiB for the whole contract, so per-token records there eventually make
+// otherwise valid mints fail. Keep accessed entries at the network maximum TTL;
+// short fixed TTLs would archive dormant NFTs after only a few days.
+const PERSISTENT_TTL_HEADROOM: u32 = 100_000;
+
+fn extend_state_ttl(env: &Env, key: &DataKey) {
+    let max_ttl = env.storage().max_ttl();
+    let threshold = max_ttl.saturating_sub(PERSISTENT_TTL_HEADROOM).max(1);
+    env.storage().persistent().extend_ttl(key, threshold, max_ttl);
+}
+
+fn state_get<T>(env: &Env, key: &DataKey) -> Option<T>
+where T: TryFromVal<Env, Val>,
+{
+    let storage = env.storage().persistent();
+    let value = storage.get(key);
+    if value.is_some() { extend_state_ttl(env, key); }
+    value
+}
+fn state_set<T>(env: &Env, key: DataKey, value: &T)
+where T: IntoVal<Env, Val>,
+{
+    let storage = env.storage().persistent();
+    storage.set(&key, value);
+    extend_state_ttl(env, &key);
+}
+fn state_remove(env: &Env, key: &DataKey) { env.storage().persistent().remove(key); }
 
 // ---------------------------------------------------------------------------
 // NFTGram SEP-50 NFT with on-chain drop stages (allowlists, FCFS / guaranteed /
@@ -56,6 +86,8 @@ pub struct AllowListEntry {
 #[contracttype]
 pub enum DataKey {
     Admin,
+    PendingAdmin,
+    CollectionMigrationLocked(String),
     NextTokenId,
     TokenOwner(u32),
     TokenApproved(u32),
@@ -96,55 +128,217 @@ impl NftDrop {
     // ---- Constructor ----
     pub fn __constructor(env: &Env, uri: String, name: String, symbol: String, owner: Address) {
         owner.require_auth();
-        env.storage().instance().set(&DataKey::Admin, &owner);
-        env.storage().instance().set(&DataKey::NextTokenId, &0u32);
-        env.storage().instance().set(&DataKey::StageCount, &0u32);
-        env.storage().instance().set(&DataKey::Revealed, &false);
+        state_set(env, DataKey::Admin, &owner);
+        state_set(env, DataKey::NextTokenId, &0u32);
+        state_set(env, DataKey::StageCount, &0u32);
+        state_set(env, DataKey::Revealed, &false);
         let metadata = TokenMetadata {
             token_uri: uri.to_bytes(),
             name,
             symbol,
             decimals: 0,
         };
-        env.storage().instance().set(&DataKey::Metadata, &metadata);
+        state_set(env, DataKey::Metadata, &metadata);
         // Payment token is unset by default; the admin must call set_payment_token
         // (e.g. with the native XLM token) before stage mints can collect proceeds.
     }
 
     pub fn admin(env: &Env) -> Address {
-        env.storage().instance().get(&DataKey::Admin).unwrap()
+        state_get(env, &DataKey::Admin).unwrap()
+    }
+
+    /// Propose a new contract administrator. The proposed address must accept
+    /// the role before it can perform upgrades or administrative actions.
+    pub fn propose_admin(env: &Env, current_admin: Address, next_admin: Address) {
+        current_admin.require_auth();
+        if state_get::<Address>(env, &DataKey::Admin) != Some(current_admin.clone()) {
+            panic!("caller is not the contract administrator");
+        }
+        if next_admin == current_admin { panic!("new administrator must be different"); }
+        state_set(env, DataKey::PendingAdmin, &next_admin);
+        env.events().publish((Symbol::new(env, "admin"), Symbol::new(env, "propose")), next_admin);
+    }
+
+    pub fn accept_admin(env: &Env, next_admin: Address) {
+        next_admin.require_auth();
+        if state_get::<Address>(env, &DataKey::PendingAdmin) != Some(next_admin.clone()) {
+            panic!("caller is not the proposed administrator");
+        }
+        state_set(env, DataKey::Admin, &next_admin);
+        state_remove(env, &DataKey::PendingAdmin);
+        env.events().publish((Symbol::new(env, "admin"), Symbol::new(env, "accept")), next_admin);
+    }
+
+    /// Upgrade contract code while preserving this contract's storage and
+    /// address. The current administrator must authorize each code hash.
+    pub fn upgrade(env: &Env, admin: Address, wasm_hash: BytesN<32>) {
+        admin.require_auth();
+        if state_get::<Address>(env, &DataKey::Admin) != Some(admin) {
+            panic!("caller is not the contract administrator");
+        }
+        env.deployer().update_current_contract(ContractExecutable::Wasm(wasm_hash.clone()));
+        env.events().publish((Symbol::new(env, "upgrade"),), wasm_hash);
+    }
+
+    /// One-time, deployer-authorized state import used when a collection moves
+    /// to a replacement mint contract. The old contract remains untouched.
+    pub fn import_collection_state(
+        env: &Env,
+        creator: Address,
+        scope: String,
+        revealed: bool,
+        placeholder_uri: String,
+    ) {
+        let admin: Address = state_get(env, &DataKey::Admin).unwrap();
+        admin.require_auth();
+        if scope.is_empty() || (!revealed && placeholder_uri.is_empty()) {
+            panic!("collection scope and unrevealed placeholder are required");
+        }
+        if state_get::<Address>(env, &DataKey::CollectionOwner(scope.clone())).is_some()
+            || state_get::<bool>(env, &DataKey::CollectionRevealConfigured(scope.clone())).unwrap_or(false)
+        { panic!("collection scope is already initialized"); }
+        state_set(env, DataKey::CollectionOwner(scope.clone()), &creator);
+        state_set(env, DataKey::CollectionRevealed(scope.clone()), &revealed);
+        state_set(env, DataKey::CollectionRevealConfigured(scope.clone()), &true);
+        state_set(env, DataKey::CollectionMigrationLocked(scope.clone()), &true);
+        if !placeholder_uri.is_empty() {
+            state_set(env, DataKey::CollectionPlaceholder(scope.clone()), &placeholder_uri.to_bytes());
+        }
+        if revealed { state_set(env, DataKey::EverPublicMetadata(scope), &true); }
+    }
+
+    pub fn complete_collection_import(env: &Env, scope: String) {
+        let admin: Address = state_get(env, &DataKey::Admin).unwrap();
+        admin.require_auth();
+        if !state_get::<bool>(env, &DataKey::CollectionMigrationLocked(scope.clone())).unwrap_or(false) {
+            panic!("collection import is not in progress");
+        }
+        state_remove(env, &DataKey::CollectionMigrationLocked(scope.clone()));
+        env.events().publish((Symbol::new(env, "import"),), scope);
+    }
+
+    /// Import a published stage and its historical counters before the new
+    /// contract is exposed to minting. This preserves supply and wallet limits.
+    pub fn import_creator_stage(
+        env: &Env,
+        creator: Address,
+        stage_id: u32,
+        kind: Symbol,
+        start_time: u64,
+        end_time: u64,
+        price: i128,
+        per_wallet_limit: u32,
+        max_supply: u32,
+        seq: u32,
+        scope: String,
+        metadata_uri: String,
+        edition_count: u32,
+        minted: u32,
+    ) {
+        let admin: Address = state_get(env, &DataKey::Admin).unwrap();
+        admin.require_auth();
+        if !state_get::<bool>(env, &DataKey::CollectionMigrationLocked(scope.clone())).unwrap_or(false) {
+            panic!("collection state import must be completed before adding stages");
+        }
+        if scope.is_empty() || end_time <= start_time || per_wallet_limit == 0 || edition_count == 0
+            || (max_supply > 0 && minted > max_supply)
+        { panic!("invalid stage import"); }
+        if state_get::<DropStage>(env, &DataKey::Stage(stage_id)).is_some() {
+            panic!("stage already imported");
+        }
+        if let Some(owner) = state_get::<Address>(env, &DataKey::CollectionOwner(scope.clone())) {
+            if owner != creator { panic!("collection creator does not match imported stage"); }
+        } else {
+            state_set(env, DataKey::CollectionOwner(scope.clone()), &creator);
+        }
+        let revealed = state_get::<bool>(env, &DataKey::CollectionRevealed(scope.clone())).unwrap_or(true);
+        let uri = if revealed { metadata_uri.to_bytes() } else {
+            state_get::<Bytes>(env, &DataKey::CollectionPlaceholder(scope.clone())).unwrap_or_else(|| panic!("collection placeholder was not imported"))
+        };
+        let stage = DropStage { kind: kind.clone(), start_time, end_time, price, per_wallet_limit, max_supply, seq };
+        state_set(env, DataKey::Stage(stage_id), &stage);
+        state_set(env, DataKey::StageOwner(stage_id), &creator);
+        state_set(env, DataKey::StageScope(stage_id), &scope);
+        state_set(env, DataKey::StageMetadata(stage_id), &uri);
+        state_set(env, DataKey::StageEditionCount(stage_id), &edition_count);
+        state_set(env, DataKey::StageMinted(stage_id), &minted);
+        state_set(env, DataKey::StageCount, &(state_get::<u32>(env, &DataKey::StageCount).unwrap_or(0) + 1));
+        if kind == Symbol::new(env, "public") {
+            if state_get::<u32>(env, &DataKey::PublicStageFor(scope.clone())).is_some() {
+                panic!("collection already has a public stage");
+            }
+            state_set(env, DataKey::PublicStageFor(scope), &stage_id);
+        }
+    }
+
+    /// Import per-wallet stage progress in small bounded chunks so large
+    /// allowlists do not exceed a single Soroban transaction's resource limits.
+    pub fn import_stage_wallets(
+        env: &Env,
+        stage_id: u32,
+        wallets: Vec<Address>,
+        wallet_minted: Vec<u32>,
+        allowlisted: Vec<bool>,
+        custom_limits: Vec<Option<u32>>,
+        custom_prices: Vec<Option<i128>>,
+    ) {
+        let admin: Address = state_get(env, &DataKey::Admin).unwrap();
+        admin.require_auth();
+        let stage: DropStage = state_get(env, &DataKey::Stage(stage_id)).unwrap_or_else(|| panic!("stage must be imported first"));
+        let scope = state_get::<String>(env, &DataKey::StageScope(stage_id)).unwrap_or_else(|| panic!("stage collection scope is missing"));
+        if !state_get::<bool>(env, &DataKey::CollectionMigrationLocked(scope)).unwrap_or(false) {
+            panic!("wallet migration is closed");
+        }
+        let count = wallets.len();
+        if count == 0 || count > 20 || wallet_minted.len() != count || allowlisted.len() != count
+            || custom_limits.len() != count || custom_prices.len() != count
+        { panic!("wallet import must contain 1 to 20 matching entries"); }
+        for i in 0..count {
+            let wallet = wallets.get(i).unwrap();
+            let minted_count = wallet_minted.get(i).unwrap();
+            if stage.kind == Symbol::new(env, "public") {
+                state_set(env, DataKey::PublicStageMint(stage_id, wallet), &minted_count);
+            } else if allowlisted.get(i).unwrap() || minted_count > 0 {
+                state_set(env, DataKey::AllowList(stage_id, wallet), &AllowListEntry {
+                    allowed: allowlisted.get(i).unwrap() || minted_count > 0,
+                    custom_limit: custom_limits.get(i).unwrap(),
+                    custom_price: custom_prices.get(i).unwrap(),
+                    minted: minted_count,
+                });
+            }
+        }
     }
 
     // ---- Metadata (SEP-50) ----
     pub fn name(env: &Env) -> String {
-        env.storage().instance().get::<_, TokenMetadata>(&DataKey::Metadata).unwrap().name
+        state_get::<TokenMetadata>(env, &DataKey::Metadata).unwrap().name
     }
     pub fn symbol(env: &Env) -> String {
-        env.storage().instance().get::<_, TokenMetadata>(&DataKey::Metadata).unwrap().symbol
+        state_get::<TokenMetadata>(env, &DataKey::Metadata).unwrap().symbol
     }
     pub fn decimals(env: &Env) -> u32 {
-        env.storage().instance().get::<_, TokenMetadata>(&DataKey::Metadata).unwrap().decimals
+        state_get::<TokenMetadata>(env, &DataKey::Metadata).unwrap().decimals
     }
     pub fn metadata(env: &Env) -> TokenMetadata {
-        env.storage().instance().get::<_, TokenMetadata>(&DataKey::Metadata).unwrap()
+        state_get::<TokenMetadata>(env, &DataKey::Metadata).unwrap()
     }
 
     /// token_uri returns the placeholder URI until the collection is revealed,
     /// then the real per-token URI.
     pub fn token_uri(env: &Env, token_id: u32) -> Bytes {
-        if let Some(scope) = env.storage().instance().get::<_, String>(&DataKey::TokenScope(token_id)) {
-            let revealed = env.storage().instance().get::<_, bool>(&DataKey::CollectionRevealed(scope.clone())).unwrap_or(true);
+        if let Some(scope) = state_get::<String>(env, &DataKey::TokenScope(token_id)) {
+            let revealed = state_get::<bool>(env, &DataKey::CollectionRevealed(scope.clone())).unwrap_or(true);
             if !revealed {
-                if let Some(placeholder) = env.storage().instance().get::<_, Bytes>(&DataKey::CollectionPlaceholder(scope)) {
+                if let Some(placeholder) = state_get::<Bytes>(env, &DataKey::CollectionPlaceholder(scope)) {
                     return placeholder;
                 }
             }
         }
-        if let Some(uri) = env.storage().instance().get::<_, Bytes>(&DataKey::TokenUri(token_id)) {
+        if let Some(uri) = state_get::<Bytes>(env, &DataKey::TokenUri(token_id)) {
             return uri;
         }
-        let meta = env.storage().instance().get::<_, TokenMetadata>(&DataKey::Metadata).unwrap();
-        let revealed: bool = env.storage().instance().get(&DataKey::Revealed).unwrap_or(false);
+        let meta = state_get::<TokenMetadata>(env, &DataKey::Metadata).unwrap();
+        let revealed: bool = state_get(env, &DataKey::Revealed).unwrap_or(false);
         if revealed {
             token_uri_for(env, &meta, token_id)
         } else {
@@ -155,11 +349,11 @@ impl NftDrop {
     /// Paginated token enumeration for a collection, used by the creator reveal flow.
     pub fn collection_token_ids(env: &Env, scope: String, start: u32, limit: u32) -> Vec<u32> {
         if limit == 0 || limit > 100 { panic!("token enumeration page size must be 1 to 100"); }
-        let count = env.storage().instance().get::<_, u32>(&DataKey::CollectionTokenCount(scope.clone())).unwrap_or(0);
+        let count = state_get::<u32>(env, &DataKey::CollectionTokenCount(scope.clone())).unwrap_or(0);
         let end = core::cmp::min(start.saturating_add(limit), count);
         let mut ids = Vec::new(env);
         for index in start..end {
-            if let Some(token_id) = env.storage().instance().get::<_, u32>(&DataKey::CollectionToken(scope.clone(), index)) {
+            if let Some(token_id) = state_get::<u32>(env, &DataKey::CollectionToken(scope.clone(), index)) {
                 ids.push_back(token_id);
             }
         }
@@ -168,12 +362,12 @@ impl NftDrop {
 
     // ---- Reveal / unreveal ----
     pub fn revealed(env: &Env) -> bool {
-        env.storage().instance().get(&DataKey::Revealed).unwrap_or(false)
+        state_get(env, &DataKey::Revealed).unwrap_or(false)
     }
     pub fn set_revealed(env: &Env, revealed: bool) {
-        let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+        let admin: Address = state_get(env, &DataKey::Admin).unwrap();
         admin.require_auth();
-        env.storage().instance().set(&DataKey::Revealed, &revealed);
+        state_set(env, DataKey::Revealed, &revealed);
         env.events().publish((Symbol::new(env, "reveal"),), revealed);
     }
 
@@ -183,25 +377,25 @@ impl NftDrop {
         if scope.is_empty() || (!revealed && placeholder_uri.is_empty()) {
             panic!("collection scope and unrevealed placeholder are required");
         }
-        let owner = env.storage().instance().get::<_, Address>(&DataKey::CollectionOwner(scope.clone()));
+        let owner = state_get::<Address>(env, &DataKey::CollectionOwner(scope.clone()));
         if let Some(owner) = owner {
             if owner != creator { panic!("only the collection creator can change reveal state"); }
         } else {
-            env.storage().instance().set(&DataKey::CollectionOwner(scope.clone()), &creator);
+            state_set(env, DataKey::CollectionOwner(scope.clone()), &creator);
         }
-        let was_configured = env.storage().instance().get::<_, bool>(&DataKey::CollectionRevealConfigured(scope.clone())).unwrap_or(false);
-        let was_revealed = env.storage().instance().get::<_, bool>(&DataKey::CollectionRevealed(scope.clone())).unwrap_or(true);
+        let was_configured = state_get::<bool>(env, &DataKey::CollectionRevealConfigured(scope.clone())).unwrap_or(false);
+        let was_revealed = state_get::<bool>(env, &DataKey::CollectionRevealed(scope.clone())).unwrap_or(true);
         if was_configured && was_revealed && !revealed {
             panic!("a revealed collection cannot be hidden again");
         }
-        if !revealed && env.storage().instance().get::<_, bool>(&DataKey::EverPublicMetadata(scope.clone())).unwrap_or(false) {
+        if !revealed && state_get::<bool>(env, &DataKey::EverPublicMetadata(scope.clone())).unwrap_or(false) {
             panic!("hide the collection before publishing any mint or stage metadata on-chain");
         }
         if !placeholder_uri.is_empty() {
-            env.storage().instance().set(&DataKey::CollectionPlaceholder(scope.clone()), &placeholder_uri.to_bytes());
+            state_set(env, DataKey::CollectionPlaceholder(scope.clone()), &placeholder_uri.to_bytes());
         }
-        env.storage().instance().set(&DataKey::CollectionRevealed(scope.clone()), &revealed);
-        env.storage().instance().set(&DataKey::CollectionRevealConfigured(scope.clone()), &true);
+        state_set(env, DataKey::CollectionRevealed(scope.clone()), &revealed);
+        state_set(env, DataKey::CollectionRevealConfigured(scope.clone()), &true);
         env.events().publish((Symbol::new(env, "collection_reveal"), scope), revealed);
     }
 
@@ -212,34 +406,34 @@ impl NftDrop {
         if token_ids.is_empty() || token_ids.len() > 20 || token_ids.len() != metadata_uris.len() {
             panic!("metadata URI batches must contain 1 to 20 matching tokens and URIs");
         }
-        if !env.storage().instance().get::<_, bool>(&DataKey::CollectionRevealed(scope.clone())).unwrap_or(true) {
+        if !state_get::<bool>(env, &DataKey::CollectionRevealed(scope.clone())).unwrap_or(true) {
             panic!("collection must be revealed before publishing token metadata");
         }
-        let owner: Address = env.storage().instance().get(&DataKey::CollectionOwner(scope.clone())).unwrap();
+        let owner: Address = state_get(env, &DataKey::CollectionOwner(scope.clone())).unwrap();
         if owner != creator { panic!("only the collection creator can publish token metadata"); }
         for index in 0..token_ids.len() {
             let token_id = token_ids.get(index).unwrap();
             let uri = metadata_uris.get(index).unwrap();
             if uri.is_empty() { panic!("metadata URI cannot be empty"); }
-            let token_scope: String = env.storage().instance().get(&DataKey::TokenScope(token_id)).unwrap();
+            let token_scope: String = state_get(env, &DataKey::TokenScope(token_id)).unwrap();
             if token_scope != scope { panic!("token does not belong to this collection"); }
-            env.storage().instance().set(&DataKey::TokenUri(token_id), &uri.to_bytes());
+            state_set(env, DataKey::TokenUri(token_id), &uri.to_bytes());
         }
     }
 
     // ---- Ownership ----
     pub fn owner_of(env: &Env, token_id: u32) -> Address {
-        env.storage().instance().get(&DataKey::TokenOwner(token_id)).unwrap()
+        state_get(env, &DataKey::TokenOwner(token_id)).unwrap()
     }
 
     /// Public collection provenance for marketplace royalty verification.
     pub fn token_scope(env: &Env, token_id: u32) -> Option<String> {
-        env.storage().instance().get(&DataKey::TokenScope(token_id))
+        state_get(env, &DataKey::TokenScope(token_id))
     }
 
     /// Public creator identity for a collection scope.
     pub fn collection_owner(env: &Env, scope: String) -> Option<Address> {
-        env.storage().instance().get(&DataKey::CollectionOwner(scope))
+        state_get(env, &DataKey::CollectionOwner(scope))
     }
 
     /// The collection creator commits canonical traits once per token. These
@@ -247,11 +441,11 @@ impl NftDrop {
     pub fn set_token_traits(env: &Env, creator: Address, token_id: u32, names: Vec<String>, values: Vec<String>) {
         creator.require_auth();
         if names.is_empty() || names.len() > 50 || names.len() != values.len() { panic!("trait batches must contain 1 to 50 matching names and values"); }
-        let scope: String = env.storage().instance().get(&DataKey::TokenScope(token_id)).unwrap_or_else(|| panic!("token has no collection scope"));
-        let owner: Address = env.storage().instance().get(&DataKey::CollectionOwner(scope)).unwrap_or_else(|| panic!("collection creator is not registered"));
+        let scope: String = state_get(env, &DataKey::TokenScope(token_id)).unwrap_or_else(|| panic!("token has no collection scope"));
+        let owner: Address = state_get(env, &DataKey::CollectionOwner(scope)).unwrap_or_else(|| panic!("collection creator is not registered"));
         if owner != creator { panic!("only the collection creator can register token traits"); }
-        let already_registered = env.storage().instance().get::<_, bool>(&DataKey::TokenTraitsRegistered(token_id)).unwrap_or(false);
-        if already_registered && env.storage().instance().get::<_, u32>(&DataKey::TokenTraitCount(token_id)).unwrap_or(0) != names.len() { panic!("registered token traits cannot be changed"); }
+        let already_registered = state_get::<bool>(env, &DataKey::TokenTraitsRegistered(token_id)).unwrap_or(false);
+        if already_registered && state_get::<u32>(env, &DataKey::TokenTraitCount(token_id)).unwrap_or(0) != names.len() { panic!("registered token traits cannot be changed"); }
         for index in 0..names.len() {
             let name = names.get(index).unwrap();
             let value = values.get(index).unwrap();
@@ -259,60 +453,63 @@ impl NftDrop {
             for other in index + 1..names.len() { if names.get(other).unwrap() == name { panic!("duplicate trait category"); } }
             let key = DataKey::TokenTrait(token_id, name.clone());
             if already_registered {
-                let existing: Option<String> = env.storage().instance().get(&key);
+                let existing: Option<String> = state_get(env, &key);
                 if existing != Some(value) { panic!("registered token traits cannot be changed"); }
             } else {
-                env.storage().instance().set(&key, &value);
+                state_set(env, key, &value);
             }
         }
         if !already_registered {
-            env.storage().instance().set(&DataKey::TokenTraitCount(token_id), &names.len());
-            env.storage().instance().set(&DataKey::TokenTraitsRegistered(token_id), &true);
+            state_set(env, DataKey::TokenTraitCount(token_id), &names.len());
+            state_set(env, DataKey::TokenTraitsRegistered(token_id), &true);
         }
     }
 
     pub fn token_trait(env: &Env, token_id: u32, name: String) -> Option<String> {
-        env.storage().instance().get(&DataKey::TokenTrait(token_id, name))
+        state_get(env, &DataKey::TokenTrait(token_id, name))
     }
 
     pub fn token_traits_registered(env: &Env, token_id: u32) -> bool {
-        env.storage().instance().get(&DataKey::TokenTraitsRegistered(token_id)).unwrap_or(false)
+        state_get(env, &DataKey::TokenTraitsRegistered(token_id)).unwrap_or(false)
     }
 
     // ---- Permissionless mint (admin only on-chain) ----
     pub fn mint(env: &Env, to: Address) -> u32 {
-        let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+        let admin: Address = state_get(env, &DataKey::Admin).unwrap();
         admin.require_auth();
-        let token_id = env.storage().instance().get::<_, u32>(&DataKey::NextTokenId).unwrap_or(0);
+        let token_id = state_get::<u32>(env, &DataKey::NextTokenId).unwrap_or(0);
         do_mint(env, &to, token_id);
-        env.storage().instance().set(&DataKey::NextTokenId, &(token_id + 1));
+        state_set(env, DataKey::NextTokenId, &(token_id + 1));
         token_id
     }
 
     /// Creator-authorized one-off mint with immutable, per-token metadata.
     pub fn mint_with_metadata(env: &Env, to: Address, collection_scope: String, metadata_uri: String) -> u32 {
         to.require_auth();
+        if state_get::<bool>(env, &DataKey::CollectionMigrationLocked(collection_scope.clone())).unwrap_or(false) {
+            panic!("collection migration is still in progress");
+        }
         if metadata_uri.is_empty() || collection_scope.is_empty() {
             panic!("collection scope and metadata URI are required");
         }
-        let owner = env.storage().instance().get::<_, Address>(&DataKey::CollectionOwner(collection_scope.clone()));
+        let owner = state_get::<Address>(env, &DataKey::CollectionOwner(collection_scope.clone()));
         if let Some(owner) = owner { if owner != to { panic!("collection belongs to another creator"); } }
-        else { env.storage().instance().set(&DataKey::CollectionOwner(collection_scope.clone()), &to); }
-        let token_id = env.storage().instance().get::<_, u32>(&DataKey::NextTokenId).unwrap_or(0);
-        let revealed = env.storage().instance().get::<_, bool>(&DataKey::CollectionRevealed(collection_scope.clone())).unwrap_or(true);
+        else { state_set(env, DataKey::CollectionOwner(collection_scope.clone()), &to); }
+        let token_id = state_get::<u32>(env, &DataKey::NextTokenId).unwrap_or(0);
+        let revealed = state_get::<bool>(env, &DataKey::CollectionRevealed(collection_scope.clone())).unwrap_or(true);
         let token_uri = if revealed { metadata_uri.to_bytes() } else {
-            env.storage().instance().get::<_, Bytes>(&DataKey::CollectionPlaceholder(collection_scope.clone())).unwrap_or_else(|| panic!("configure an unrevealed placeholder before minting"))
+            state_get::<Bytes>(env, &DataKey::CollectionPlaceholder(collection_scope.clone())).unwrap_or_else(|| panic!("configure an unrevealed placeholder before minting"))
         };
-        if revealed { env.storage().instance().set(&DataKey::EverPublicMetadata(collection_scope.clone()), &true); }
+        if revealed { state_set(env, DataKey::EverPublicMetadata(collection_scope.clone()), &true); }
         if !revealed {
-            let placeholder = env.storage().instance().get::<_, Bytes>(&DataKey::CollectionPlaceholder(collection_scope.clone())).unwrap_or_else(|| panic!("configure an unrevealed placeholder before minting"));
+            let placeholder = state_get::<Bytes>(env, &DataKey::CollectionPlaceholder(collection_scope.clone())).unwrap_or_else(|| panic!("configure an unrevealed placeholder before minting"));
             if metadata_uri.to_bytes() != placeholder { panic!("unrevealed mint calls must use the placeholder URI"); }
         }
-        env.storage().instance().set(&DataKey::TokenUri(token_id), &token_uri);
-        env.storage().instance().set(&DataKey::TokenScope(token_id), &collection_scope);
+        state_set(env, DataKey::TokenUri(token_id), &token_uri);
+        state_set(env, DataKey::TokenScope(token_id), &collection_scope);
         track_collection_token(env, &collection_scope, token_id);
         do_mint(env, &to, token_id);
-        env.storage().instance().set(&DataKey::NextTokenId, &(token_id + 1));
+        state_set(env, DataKey::NextTokenId, &(token_id + 1));
         token_id
     }
 
@@ -337,81 +534,81 @@ impl NftDrop {
         if end_time <= start_time || per_wallet_limit == 0 || metadata_uri.is_empty() || collection_scope.is_empty() || edition_count == 0 {
             panic!("invalid stage configuration");
         }
-        let collection_owner = env.storage().instance().get::<_, Address>(&DataKey::CollectionOwner(collection_scope.clone()));
+        let collection_owner = state_get::<Address>(env, &DataKey::CollectionOwner(collection_scope.clone()));
         if let Some(owner) = collection_owner { if owner != creator { panic!("collection belongs to another creator"); } }
-        else { env.storage().instance().set(&DataKey::CollectionOwner(collection_scope.clone()), &creator); }
-        let existing_owner = env.storage().instance().get::<_, Address>(&DataKey::StageOwner(stage_id));
+        else { state_set(env, DataKey::CollectionOwner(collection_scope.clone()), &creator); }
+        let existing_owner = state_get::<Address>(env, &DataKey::StageOwner(stage_id));
         if let Some(owner) = existing_owner {
             if owner != creator {
                 panic!("stage belongs to another creator");
             }
-            if let Some(existing_stage) = env.storage().instance().get::<_, DropStage>(&DataKey::Stage(stage_id)) {
+            if let Some(existing_stage) = state_get::<DropStage>(env, &DataKey::Stage(stage_id)) {
                 if existing_stage.kind != kind {
                     panic!("stage kind cannot be changed");
                 }
             }
-            if env.storage().instance().get::<_, u32>(&DataKey::StageMinted(stage_id)).unwrap_or(0) > 0 {
+            if state_get::<u32>(env, &DataKey::StageMinted(stage_id)).unwrap_or(0) > 0 {
                 panic!("a stage cannot be changed after minting starts");
             }
         } else {
-            let count = env.storage().instance().get::<_, u32>(&DataKey::StageCount).unwrap_or(0);
-            env.storage().instance().set(&DataKey::StageCount, &(count + 1));
-            env.storage().instance().set(&DataKey::StageOwner(stage_id), &creator);
+            let count = state_get::<u32>(env, &DataKey::StageCount).unwrap_or(0);
+            state_set(env, DataKey::StageCount, &(count + 1));
+            state_set(env, DataKey::StageOwner(stage_id), &creator);
         }
         if kind != Symbol::new(env, "public")
-            && env.storage().instance().get::<_, u32>(&DataKey::PublicStageFor(collection_scope.clone())).is_some()
+            && state_get::<u32>(env, &DataKey::PublicStageFor(collection_scope.clone())).is_some()
         {
             panic!("presale stages must precede the public stage");
         }
         if kind == Symbol::new(env, "public") {
-            if let Some(public_stage) = env.storage().instance().get::<_, u32>(&DataKey::PublicStageFor(collection_scope.clone())) {
+            if let Some(public_stage) = state_get::<u32>(env, &DataKey::PublicStageFor(collection_scope.clone())) {
                 if public_stage != stage_id {
                     panic!("only one public stage is allowed");
                 }
             }
-            env.storage().instance().set(&DataKey::PublicStageFor(collection_scope.clone()), &stage_id);
+            state_set(env, DataKey::PublicStageFor(collection_scope.clone()), &stage_id);
         }
         let stage = DropStage { kind, start_time, end_time, price, per_wallet_limit, max_supply, seq };
-        env.storage().instance().set(&DataKey::Stage(stage_id), &stage);
-        env.storage().instance().set(&DataKey::StageScope(stage_id), &collection_scope);
-        let revealed = env.storage().instance().get::<_, bool>(&DataKey::CollectionRevealed(collection_scope.clone())).unwrap_or(true);
-        let stage_uri = if revealed { env.storage().instance().set(&DataKey::EverPublicMetadata(collection_scope.clone()), &true); metadata_uri.to_bytes() } else {
-            let placeholder = env.storage().instance().get::<_, Bytes>(&DataKey::CollectionPlaceholder(collection_scope.clone())).unwrap_or_else(|| panic!("configure an unrevealed placeholder before creating stages"));
+        state_set(env, DataKey::Stage(stage_id), &stage);
+        state_set(env, DataKey::StageScope(stage_id), &collection_scope);
+        let revealed = state_get::<bool>(env, &DataKey::CollectionRevealed(collection_scope.clone())).unwrap_or(true);
+        let stage_uri = if revealed { state_set(env, DataKey::EverPublicMetadata(collection_scope.clone()), &true); metadata_uri.to_bytes() } else {
+            let placeholder = state_get::<Bytes>(env, &DataKey::CollectionPlaceholder(collection_scope.clone())).unwrap_or_else(|| panic!("configure an unrevealed placeholder before creating stages"));
             if metadata_uri.to_bytes() != placeholder { panic!("unrevealed stage calls must use the placeholder URI"); }
             placeholder
         };
-        env.storage().instance().set(&DataKey::StageMetadata(stage_id), &stage_uri);
-        env.storage().instance().set(&DataKey::StageEditionCount(stage_id), &edition_count);
+        state_set(env, DataKey::StageMetadata(stage_id), &stage_uri);
+        state_set(env, DataKey::StageEditionCount(stage_id), &edition_count);
         env.events().publish((Symbol::new(env, "stage"), stage_id), stage);
     }
 
     pub fn remove_creator_stage(env: &Env, creator: Address, stage_id: u32) {
         creator.require_auth();
-        let owner: Address = env.storage().instance().get(&DataKey::StageOwner(stage_id)).unwrap();
+        let owner: Address = state_get(env, &DataKey::StageOwner(stage_id)).unwrap();
         if owner != creator {
             panic!("only the stage creator can remove it");
         }
-        let stage: DropStage = env.storage().instance().get(&DataKey::Stage(stage_id)).unwrap();
+        let stage: DropStage = state_get(env, &DataKey::Stage(stage_id)).unwrap();
         if stage.kind == Symbol::new(env, "public") {
             panic!("public stage cannot be removed");
         }
-        if env.storage().instance().get::<_, u32>(&DataKey::StageMinted(stage_id)).unwrap_or(0) > 0 {
+        if state_get::<u32>(env, &DataKey::StageMinted(stage_id)).unwrap_or(0) > 0 {
             panic!("a stage cannot be removed after minting starts");
         }
-        env.storage().instance().remove(&DataKey::Stage(stage_id));
-        env.storage().instance().remove(&DataKey::StageOwner(stage_id));
-        if let Some(scope) = env.storage().instance().get::<_, String>(&DataKey::StageScope(stage_id)) {
-            let public_stage = env.storage().instance().get::<_, u32>(&DataKey::PublicStageFor(scope.clone()));
+        state_remove(env, &DataKey::Stage(stage_id));
+        state_remove(env, &DataKey::StageOwner(stage_id));
+        if let Some(scope) = state_get::<String>(env, &DataKey::StageScope(stage_id)) {
+            let public_stage = state_get::<u32>(env, &DataKey::PublicStageFor(scope.clone()));
             if public_stage == Some(stage_id) {
-                env.storage().instance().remove(&DataKey::PublicStageFor(scope));
+                state_remove(env, &DataKey::PublicStageFor(scope));
             }
         }
-        env.storage().instance().remove(&DataKey::StageScope(stage_id));
-        env.storage().instance().remove(&DataKey::StageMetadata(stage_id));
-        env.storage().instance().remove(&DataKey::StageEditionCount(stage_id));
-        env.storage().instance().remove(&DataKey::StageMinted(stage_id));
-        let count = env.storage().instance().get::<_, u32>(&DataKey::StageCount).unwrap_or(0);
-        env.storage().instance().set(&DataKey::StageCount, &count.saturating_sub(1));
+        state_remove(env, &DataKey::StageScope(stage_id));
+        state_remove(env, &DataKey::StageMetadata(stage_id));
+        state_remove(env, &DataKey::StageEditionCount(stage_id));
+        state_remove(env, &DataKey::StageMinted(stage_id));
+        let count = state_get::<u32>(env, &DataKey::StageCount).unwrap_or(0);
+        state_set(env, DataKey::StageCount, &count.saturating_sub(1));
     }
 
     pub fn whitelist_creator_wallet(
@@ -424,29 +621,29 @@ impl NftDrop {
         custom_price: Option<i128>,
     ) {
         creator.require_auth();
-        let owner: Address = env.storage().instance().get(&DataKey::StageOwner(stage_id)).unwrap();
+        let owner: Address = state_get(env, &DataKey::StageOwner(stage_id)).unwrap();
         if owner != creator {
             panic!("only the stage creator can edit its allowlist");
         }
-        let stage: DropStage = env.storage().instance().get(&DataKey::Stage(stage_id)).unwrap();
+        let stage: DropStage = state_get(env, &DataKey::Stage(stage_id)).unwrap();
         if stage.kind == Symbol::new(env, "public") {
             panic!("public stage has no allowlist");
         }
-        let minted = env.storage().instance().get::<_, AllowListEntry>(&DataKey::AllowList(stage_id, wallet.clone())).map(|entry| entry.minted).unwrap_or(0);
+        let minted = state_get::<AllowListEntry>(env, &DataKey::AllowList(stage_id, wallet.clone())).map(|entry| entry.minted).unwrap_or(0);
         if !allowed && minted == 0 {
-            env.storage().instance().remove(&DataKey::AllowList(stage_id, wallet.clone()));
+            state_remove(env, &DataKey::AllowList(stage_id, wallet.clone()));
         } else {
-            env.storage().instance().set(&DataKey::AllowList(stage_id, wallet.clone()), &AllowListEntry { allowed, custom_limit, custom_price, minted });
+            state_set(env, DataKey::AllowList(stage_id, wallet.clone()), &AllowListEntry { allowed, custom_limit, custom_price, minted });
         }
         env.events().publish((Symbol::new(env, "whitelist"), stage_id, wallet), allowed);
     }
 
     // ---- Drop stages (admin) ----
     pub fn stage_count(env: &Env) -> u32 {
-        env.storage().instance().get(&DataKey::StageCount).unwrap_or(0)
+        state_get(env, &DataKey::StageCount).unwrap_or(0)
     }
     pub fn get_stage(env: &Env, stage_id: u32) -> DropStage {
-        env.storage().instance().get(&DataKey::Stage(stage_id)).unwrap()
+        state_get(env, &DataKey::Stage(stage_id)).unwrap()
     }
 
     /// Admin creates or replaces a stage. Exactly one public stage is allowed.
@@ -461,16 +658,16 @@ impl NftDrop {
         max_supply: u32,
         seq: u32,
     ) {
-        let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+        let admin: Address = state_get(env, &DataKey::Admin).unwrap();
         admin.require_auth();
         if end_time <= start_time {
             panic!("stage end must be after start");
         }
         if kind == Symbol::new(env, "public") {
-            let count = env.storage().instance().get::<_, u32>(&DataKey::StageCount).unwrap_or(0);
+            let count = state_get::<u32>(env, &DataKey::StageCount).unwrap_or(0);
             for i in 0..count {
                 if i != stage_id {
-                    if let Some(s) = env.storage().instance().get::<_, DropStage>(&DataKey::Stage(i)) {
+                    if let Some(s) = state_get::<DropStage>(env, &DataKey::Stage(i)) {
                         if s.kind == Symbol::new(env, "public") {
                             panic!("only one public stage allowed");
                         }
@@ -487,25 +684,25 @@ impl NftDrop {
             max_supply,
             seq,
         };
-        if env.storage().instance().get::<_, DropStage>(&DataKey::Stage(stage_id)).is_none() {
-            let count = env.storage().instance().get::<_, u32>(&DataKey::StageCount).unwrap_or(0);
-            env.storage().instance().set(&DataKey::StageCount, &(count + 1));
+        if state_get::<DropStage>(env, &DataKey::Stage(stage_id)).is_none() {
+            let count = state_get::<u32>(env, &DataKey::StageCount).unwrap_or(0);
+            state_set(env, DataKey::StageCount, &(count + 1));
         }
-        env.storage().instance().set(&DataKey::Stage(stage_id), &stage);
+        state_set(env, DataKey::Stage(stage_id), &stage);
         env.events().publish((Symbol::new(env, "stage"), stage_id), stage.clone());
     }
 
     pub fn remove_stage(env: &Env, stage_id: u32) {
-        let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+        let admin: Address = state_get(env, &DataKey::Admin).unwrap();
         admin.require_auth();
-        let stage: DropStage = env.storage().instance().get(&DataKey::Stage(stage_id)).unwrap();
+        let stage: DropStage = state_get(env, &DataKey::Stage(stage_id)).unwrap();
         if stage.kind == Symbol::new(env, "public") {
             panic!("public stage cannot be removed");
         }
-        env.storage().instance().remove(&DataKey::Stage(stage_id));
-        env.storage().instance().remove(&DataKey::StageMinted(stage_id));
-        let count = env.storage().instance().get::<_, u32>(&DataKey::StageCount).unwrap_or(0);
-        env.storage().instance().set(&DataKey::StageCount, &count.saturating_sub(1));
+        state_remove(env, &DataKey::Stage(stage_id));
+        state_remove(env, &DataKey::StageMinted(stage_id));
+        let count = state_get::<u32>(env, &DataKey::StageCount).unwrap_or(0);
+        state_set(env, DataKey::StageCount, &count.saturating_sub(1));
     }
 
     // ---- Allowlist (admin) ----
@@ -517,41 +714,43 @@ impl NftDrop {
         custom_limit: Option<u32>,
         custom_price: Option<i128>,
     ) {
-        let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+        let admin: Address = state_get(env, &DataKey::Admin).unwrap();
         admin.require_auth();
-        let stage: DropStage = env.storage().instance().get(&DataKey::Stage(stage_id)).unwrap();
+        let stage: DropStage = state_get(env, &DataKey::Stage(stage_id)).unwrap();
         if stage.kind == Symbol::new(env, "public") {
             panic!("public stage has no allowlist");
         }
-        let minted = env
-            .storage()
-            .instance()
-            .get::<_, AllowListEntry>(&DataKey::AllowList(stage_id, wallet.clone()))
+        let minted = state_get::<AllowListEntry>(env, &DataKey::AllowList(stage_id, wallet.clone()))
             .map(|e| e.minted)
             .unwrap_or(0);
         if !allowed && minted == 0 {
-            env.storage().instance().remove(&DataKey::AllowList(stage_id, wallet.clone()));
+            state_remove(env, &DataKey::AllowList(stage_id, wallet.clone()));
         } else {
-            env.storage().instance().set(
-                &DataKey::AllowList(stage_id, wallet.clone()),
-                &AllowListEntry { allowed, custom_limit, custom_price, minted },
-            );
+            state_set(env, DataKey::AllowList(stage_id, wallet.clone()), &AllowListEntry { allowed, custom_limit, custom_price, minted });
         }
         env.events().publish((Symbol::new(env, "whitelist"), stage_id, wallet), allowed);
     }
 
     pub fn allowlist_entry(env: &Env, stage_id: u32, wallet: Address) -> Option<AllowListEntry> {
-        env.storage().instance().get(&DataKey::AllowList(stage_id, wallet))
+        state_get(env, &DataKey::AllowList(stage_id, wallet))
+    }
+
+    pub fn public_stage_minted(env: &Env, stage_id: u32, wallet: Address) -> u32 {
+        state_get(env, &DataKey::PublicStageMint(stage_id, wallet)).unwrap_or(0)
+    }
+
+    pub fn stage_minted(env: &Env, stage_id: u32) -> u32 {
+        state_get(env, &DataKey::StageMinted(stage_id)).unwrap_or(0)
     }
 
     // ---- Payment token (admin) ----
     pub fn payment_token(env: &Env) -> Address {
-        env.storage().instance().get(&DataKey::PaymentToken).unwrap()
+        state_get(env, &DataKey::PaymentToken).unwrap()
     }
     pub fn set_payment_token(env: &Env, payment_token: Address) {
-        let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+        let admin: Address = state_get(env, &DataKey::Admin).unwrap();
         admin.require_auth();
-        env.storage().instance().set(&DataKey::PaymentToken, &payment_token);
+        state_set(env, DataKey::PaymentToken, &payment_token);
     }
 
     // ---- On-chain stage mint (drop gating) ----
@@ -562,7 +761,11 @@ impl NftDrop {
         if quantity == 0 {
             panic!("quantity must be positive");
         }
-        let stage: DropStage = env.storage().instance().get(&DataKey::Stage(stage_id)).unwrap();
+        let stage: DropStage = state_get(env, &DataKey::Stage(stage_id)).unwrap();
+        let scope = state_get::<String>(env, &DataKey::StageScope(stage_id)).unwrap_or_else(|| panic!("stage collection scope is missing"));
+        if state_get::<bool>(env, &DataKey::CollectionMigrationLocked(scope)).unwrap_or(false) {
+            panic!("collection migration is still in progress");
+        }
         let now = env.ledger().timestamp();
         if now < stage.start_time || now > stage.end_time {
             panic!("stage is not active");
@@ -572,10 +775,7 @@ impl NftDrop {
         let (limit, price) = if is_public {
             (stage.per_wallet_limit, stage.price)
         } else {
-            let entry = env
-                .storage()
-                .instance()
-                .get::<_, AllowListEntry>(&DataKey::AllowList(stage_id, to.clone()))
+            let entry = state_get::<AllowListEntry>(env, &DataKey::AllowList(stage_id, to.clone()))
                 .expect("not on the allowlist for this stage");
             if !entry.allowed {
                 panic!("not on the allowlist for this stage");
@@ -588,83 +788,79 @@ impl NftDrop {
 
         // Per-wallet limit.
         let wallet_minted = if is_public {
-            env.storage()
-                .instance()
-                .get::<_, u32>(&DataKey::PublicStageMint(stage_id, to.clone()))
+            state_get::<u32>(env, &DataKey::PublicStageMint(stage_id, to.clone()))
                 .unwrap_or(0)
         } else {
-            env.storage()
-                .instance()
-                .get::<_, AllowListEntry>(&DataKey::AllowList(stage_id, to.clone()))
+            state_get::<AllowListEntry>(env, &DataKey::AllowList(stage_id, to.clone()))
                 .unwrap()
                 .minted
         };
-        if wallet_minted + quantity > limit {
+        if wallet_minted.checked_add(quantity).unwrap_or(u32::MAX) > limit {
             panic!("per-wallet mint limit exceeded");
         }
 
         // Stage supply.
         if stage.max_supply > 0 {
-            let stage_minted: u32 = env.storage().instance().get(&DataKey::StageMinted(stage_id)).unwrap_or(0);
-            if stage_minted + quantity > stage.max_supply {
+            let stage_minted: u32 = state_get(env, &DataKey::StageMinted(stage_id)).unwrap_or(0);
+            if stage_minted.checked_add(quantity).unwrap_or(u32::MAX) > stage.max_supply {
                 panic!("stage supply exhausted");
             }
         }
 
         // Collect payment.
         if price > 0 {
-            let payment_token: Address = env.storage().instance().get(&DataKey::PaymentToken).unwrap();
+            let payment_token: Address = state_get(env, &DataKey::PaymentToken).unwrap();
             let client = token::Client::new(env, &payment_token);
-            let total = price * quantity as i128;
-            let payout: Address = env.storage().instance().get(&DataKey::StageOwner(stage_id)).unwrap_or_else(|| {
-                env.storage().instance().get(&DataKey::Admin).unwrap()
+            let total = price.checked_mul(quantity as i128).expect("mint payment overflow");
+            let payout: Address = state_get(env, &DataKey::StageOwner(stage_id)).unwrap_or_else(|| {
+                state_get(env, &DataKey::Admin).unwrap()
             });
             client.transfer(&to, &payout, &total);
         }
 
         // Mint.
         let mut token_ids: Vec<u32> = Vec::new(env);
-        let start_edition = env.storage().instance().get::<_, u32>(&DataKey::StageMinted(stage_id)).unwrap_or(0);
-        let stage_uri: Bytes = env.storage().instance().get(&DataKey::StageMetadata(stage_id)).unwrap_or_else(|| {
-            env.storage().instance().get::<_, TokenMetadata>(&DataKey::Metadata).unwrap().token_uri
+        let start_edition = state_get::<u32>(env, &DataKey::StageMinted(stage_id)).unwrap_or(0);
+        let stage_uri: Bytes = state_get(env, &DataKey::StageMetadata(stage_id)).unwrap_or_else(|| {
+            state_get::<TokenMetadata>(env, &DataKey::Metadata).unwrap().token_uri
         });
-        let edition_count = env.storage().instance().get::<_, u32>(&DataKey::StageEditionCount(stage_id)).unwrap_or(1);
-        let stage_scope: String = env.storage().instance().get(&DataKey::StageScope(stage_id)).unwrap_or(String::from_str(env, ""));
+        let edition_count = state_get::<u32>(env, &DataKey::StageEditionCount(stage_id)).unwrap_or(1);
+        let stage_scope: String = state_get(env, &DataKey::StageScope(stage_id)).unwrap_or(String::from_str(env, ""));
         for _ in 0..quantity {
-            let token_id = env.storage().instance().get::<_, u32>(&DataKey::NextTokenId).unwrap_or(0);
-            let edition_index = start_edition + token_ids.len();
-            let collection_revealed = env.storage().instance().get::<_, bool>(&DataKey::CollectionRevealed(stage_scope.clone())).unwrap_or(true);
+            let token_id = state_get::<u32>(env, &DataKey::NextTokenId).unwrap_or(0);
+            let edition_index = start_edition.checked_add(token_ids.len()).expect("edition index overflow");
+            let collection_revealed = state_get::<bool>(env, &DataKey::CollectionRevealed(stage_scope.clone())).unwrap_or(true);
             let edition_uri = if !collection_revealed { stage_uri.clone() } else if edition_count > 1 { append_edition_uri(env, &stage_uri, edition_index % edition_count) } else { stage_uri.clone() };
-            env.storage().instance().set(&DataKey::TokenUri(token_id), &edition_uri);
-            env.storage().instance().set(&DataKey::TokenScope(token_id), &stage_scope);
+            state_set(env, DataKey::TokenUri(token_id), &edition_uri);
+            state_set(env, DataKey::TokenScope(token_id), &stage_scope);
             track_collection_token(env, &stage_scope, token_id);
             do_mint(env, &to, token_id);
-            env.storage().instance().set(&DataKey::NextTokenId, &(token_id + 1));
+            state_set(env, DataKey::NextTokenId, &token_id.checked_add(1).expect("token id exhausted"));
             token_ids.push_back(token_id);
         }
 
         // Record minted counts.
         if is_public {
-            let pub_minted = env.storage().instance().get::<_, u32>(&DataKey::PublicStageMint(stage_id, to.clone())).unwrap_or(0);
-            env.storage().instance().set(&DataKey::PublicStageMint(stage_id, to.clone()), &(pub_minted + quantity));
+            let pub_minted = state_get::<u32>(env, &DataKey::PublicStageMint(stage_id, to.clone())).unwrap_or(0);
+            state_set(env, DataKey::PublicStageMint(stage_id, to.clone()), &pub_minted.checked_add(quantity).expect("wallet mint count overflow"));
         } else {
-            let mut entry = env.storage().instance().get::<_, AllowListEntry>(&DataKey::AllowList(stage_id, to.clone())).unwrap();
-            entry.minted += quantity;
-            env.storage().instance().set(&DataKey::AllowList(stage_id, to.clone()), &entry);
+            let mut entry = state_get::<AllowListEntry>(env, &DataKey::AllowList(stage_id, to.clone())).unwrap();
+            entry.minted = entry.minted.checked_add(quantity).expect("wallet mint count overflow");
+            state_set(env, DataKey::AllowList(stage_id, to.clone()), &entry);
         }
-        let stage_minted: u32 = env.storage().instance().get(&DataKey::StageMinted(stage_id)).unwrap_or(0);
-        env.storage().instance().set(&DataKey::StageMinted(stage_id), &(stage_minted + quantity));
+        let stage_minted: u32 = state_get(env, &DataKey::StageMinted(stage_id)).unwrap_or(0);
+        state_set(env, DataKey::StageMinted(stage_id), &stage_minted.checked_add(quantity).expect("stage mint count overflow"));
 
         // Include the actual amount collected by the contract (after any
         // allowlist price override) so analytics can count primary volume.
-        env.events().publish((Symbol::new(env, "stage_mint"), stage_id, to), (start_edition, token_ids.clone(), price * quantity as i128));
+        env.events().publish((Symbol::new(env, "stage_mint"), stage_id, to), (start_edition, token_ids.clone(), price.checked_mul(quantity as i128).expect("mint payment overflow")));
         (start_edition, token_ids)
     }
 
     // ---- SEP-50 transfer / approvals ----
     pub fn transfer(env: &Env, from: Address, to: Address, token_id: u32) {
         from.require_auth();
-        let owner = env.storage().instance().get::<_, Address>(&DataKey::TokenOwner(token_id)).unwrap();
+        let owner = state_get::<Address>(env, &DataKey::TokenOwner(token_id)).unwrap();
         if owner != from {
             panic!("not the owner");
         }
@@ -673,12 +869,12 @@ impl NftDrop {
 
     pub fn transfer_from(env: &Env, spender: Address, from: Address, to: Address, token_id: u32) {
         spender.require_auth();
-        let owner = env.storage().instance().get::<_, Address>(&DataKey::TokenOwner(token_id)).unwrap();
+        let owner = state_get::<Address>(env, &DataKey::TokenOwner(token_id)).unwrap();
         if owner != from {
             panic!("address is not the owner");
         }
         if spender != from {
-            let allowance: Allowance = env.storage().instance().get(&DataKey::TokenApproved(token_id)).unwrap();
+            let allowance: Allowance = state_get(env, &DataKey::TokenApproved(token_id)).unwrap();
             if allowance.spender != spender {
                 panic!("spender not approved");
             }
@@ -691,72 +887,66 @@ impl NftDrop {
 
     pub fn set_approved(env: &Env, owner: Address, operator: Address, token_id: u32, approved: bool) {
         owner.require_auth();
-        let current_owner = env.storage().instance().get::<_, Address>(&DataKey::TokenOwner(token_id)).unwrap();
+        let current_owner = state_get::<Address>(env, &DataKey::TokenOwner(token_id)).unwrap();
         if current_owner != owner {
             panic!("not the owner");
         }
         if approved {
-            env.storage().instance().set(
-                &DataKey::TokenApproved(token_id),
-                &Allowance { spender: operator.clone(), live_until_ledger: u32::MAX },
-            );
+            state_set(env, DataKey::TokenApproved(token_id), &Allowance { spender: operator.clone(), live_until_ledger: u32::MAX });
         } else {
-            env.storage().instance().remove(&DataKey::TokenApproved(token_id));
+            state_remove(env, &DataKey::TokenApproved(token_id));
         }
         env.events().publish((Symbol::new(env, "approve"), owner, operator, token_id), approved);
     }
 
     pub fn approve(env: &Env, from: Address, spender: Address, token_id: u32, live_until_ledger: u32) {
         from.require_auth();
-        let owner = env.storage().instance().get::<_, Address>(&DataKey::TokenOwner(token_id)).unwrap();
+        let owner = state_get::<Address>(env, &DataKey::TokenOwner(token_id)).unwrap();
         if owner != from {
             panic!("not the owner");
         }
-        env.storage().instance().set(
-            &DataKey::TokenApproved(token_id),
-            &Allowance { spender: spender.clone(), live_until_ledger },
-        );
+        state_set(env, DataKey::TokenApproved(token_id), &Allowance { spender: spender.clone(), live_until_ledger });
         env.events().publish((Symbol::new(env, "approve"), from, spender, token_id), live_until_ledger);
     }
 
     pub fn get_approved(env: &Env, token_id: u32) -> Option<Address> {
-        env.storage().instance().get::<_, Allowance>(&DataKey::TokenApproved(token_id)).map(|a| a.spender)
+        state_get::<Allowance>(env, &DataKey::TokenApproved(token_id)).map(|a| a.spender)
     }
 
     pub fn nonce(env: &Env, addr: Address) -> u128 {
-        env.storage().instance().get(&DataKey::Nonce(addr)).unwrap_or(0)
+        state_get(env, &DataKey::Nonce(addr)).unwrap_or(0)
     }
 }
 
 fn do_mint(env: &Env, to: &Address, token_id: u32) {
-    if env.storage().instance().has(&DataKey::TokenOwner(token_id)) {
+    if env.storage().persistent().has(&DataKey::TokenOwner(token_id)) {
         panic!("token already minted");
     }
-    env.storage().instance().set(&DataKey::TokenOwner(token_id), to);
+    state_set(env, DataKey::TokenOwner(token_id), to);
     env.events().publish((Symbol::new(env, "mint"), to), token_id);
 }
 
 fn track_collection_token(env: &Env, scope: &String, token_id: u32) {
-    let count = env.storage().instance().get::<_, u32>(&DataKey::CollectionTokenCount(scope.clone())).unwrap_or(0);
-    env.storage().instance().set(&DataKey::CollectionToken(scope.clone(), count), &token_id);
-    env.storage().instance().set(&DataKey::CollectionTokenCount(scope.clone()), &(count + 1));
+    let count = state_get::<u32>(env, &DataKey::CollectionTokenCount(scope.clone())).unwrap_or(0);
+    state_set(env, DataKey::CollectionToken(scope.clone(), count), &token_id);
+    state_set(env, DataKey::CollectionTokenCount(scope.clone()), &(count + 1));
 }
 
 fn do_transfer(env: &Env, from: &Address, to: &Address, token_id: u32) {
-    let prev_owner = env.storage().instance().get::<_, Address>(&DataKey::TokenOwner(token_id)).unwrap();
+    let prev_owner = state_get::<Address>(env, &DataKey::TokenOwner(token_id)).unwrap();
     if &prev_owner != from {
         panic!("not the owner");
     }
-    env.storage().instance().set(&DataKey::TokenOwner(token_id), to);
-    env.storage().instance().remove(&DataKey::TokenApproved(token_id));
+    state_set(env, DataKey::TokenOwner(token_id), to);
+    state_remove(env, &DataKey::TokenApproved(token_id));
     bump_nonce(env, from);
     bump_nonce(env, to);
     env.events().publish((Symbol::new(env, "transfer"), from.clone(), to.clone()), token_id);
 }
 
 fn bump_nonce(env: &Env, addr: &Address) {
-    let nonce: u128 = env.storage().instance().get(&DataKey::Nonce(addr.clone())).unwrap_or(0);
-    env.storage().instance().set(&DataKey::Nonce(addr.clone()), &(nonce + 1));
+    let nonce: u128 = state_get(env, &DataKey::Nonce(addr.clone())).unwrap_or(0);
+    state_set(env, DataKey::Nonce(addr.clone()), &(nonce + 1));
 }
 
 fn token_uri_for(env: &Env, meta: &TokenMetadata, token_id: u32) -> Bytes {

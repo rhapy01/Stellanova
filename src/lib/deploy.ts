@@ -4,9 +4,30 @@ import { scValToNative } from '@stellar/stellar-sdk'
 import { signStellarTransaction, STELLAR_NETWORK_PASSPHRASE, SOROBAN_RPC_URL, type StellarWallet } from './stellar'
 
 const server = new StellarSdk.rpc.Server(SOROBAN_RPC_URL)
-const fallbackNftContractId = import.meta.env.VITE_STELLAR_NFT_CONTRACT_ID ?? 'CDEESFFVHROBZDWVK7CCKTUFGGATKIZOIOS4BHA7V6ENRF3W25C6FBOR'
+const configuredNftContractId = import.meta.env.VITE_STELLAR_NFT_CONTRACT_ID ?? ''
+const fallbackNftContractId = configuredNftContractId || 'CDEESFFVHROBZDWVK7CCKTUFGGATKIZOIOS4BHA7V6ENRF3W25C6FBOR'
+
+function firstErrorMessage(value: unknown): string | undefined {
+  if (typeof value === 'string') return value
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const message = firstErrorMessage(item)
+      if (message) return message
+    }
+  }
+  if (value && typeof value === 'object') {
+    for (const item of Object.values(value)) {
+      const message = firstErrorMessage(item)
+      if (message) return message
+    }
+  }
+  return undefined
+}
 
 export function getSorobanNftContractId(): string {
+  // A production build's configured contract is authoritative. The browser
+  // override exists only for explicit local deployment-console sessions.
+  if (configuredNftContractId) return configuredNftContractId
   if (typeof window !== 'undefined') {
     const deployed = window.localStorage.getItem('nftgram:nft-contract')
     if (deployed) return deployed
@@ -42,7 +63,28 @@ async function submitPrepared(transaction: StellarSdk.Transaction, wallet: Stell
       response.hash = sent.hash
       return response
     }
-    if (result.status === 'FAILED') throw new Error(`Stellar transaction failed: ${sent.hash}`)
+    if (result.status === 'FAILED') {
+      const failedResult = result as typeof result & { diagnosticEventsXdr?: StellarSdk.xdr.DiagnosticEvent[] }
+      const failureReason = failedResult.diagnosticEventsXdr
+        ?.map((diagnostic) => {
+          const event = diagnostic.event
+          const eventBody = event.body.value
+          const topics = eventBody.topics.map((topic) => scValToNative(topic))
+          if (topics[0] !== 'error') return ''
+          const data = scValToNative(eventBody.data)
+          const message = firstErrorMessage(data)
+          if (message?.toLowerCase().includes('contractdata size exceeds') && Array.isArray(data)) {
+            const sizes = data.filter((value): value is number | bigint => typeof value === 'number' || typeof value === 'bigint')
+            if (sizes.length >= 2) return `NFT contract instance storage limit exceeded (${sizes[0].toString()} bytes required; Stellar network limit ${sizes[1].toString()} bytes)`
+          }
+          return message ?? ''
+        })
+        .find(Boolean)
+      const hint = failureReason?.toLowerCase().includes('contract instance storage limit exceeded')
+        ? ' The transaction failed atomically: no NFT or payment was committed. This collection needs a replacement mint contract; its existing NFTs and marketplace listings must remain attached to the current contract.'
+        : ''
+      throw new Error(`Stellar transaction failed: ${failureReason || 'the network rejected the contract call'}.${hint} Transaction: ${sent.hash}`)
+    }
   }
   throw new Error(`Timed out while confirming Stellar transaction ${sent.hash}`)
 }
@@ -385,23 +427,83 @@ export async function whitelistCreatorWalletBatch(wallet: StellarWallet, contrac
   ] })), wallet)
 }
 
-export async function mintFromStage(wallet: StellarWallet, contractId: string, stageId: number, quantity = 1) {
+export type ConfirmedStageMintChunk = { editionStart: number; tokenIds: number[]; hash: string }
+
+function isSorobanResourceLimitError(message: string) {
+  return /transaction resource|resource limit|budget.?exceed|exceeded.?limit|footprint|maximum.{0,20}(read|write|event|instruction|byte)|exceeded.{0,30}(read|write|event|instruction|byte)|too many.{0,20}(storage|ledger|event)/i.test(message)
+}
+
+export async function mintFromStage(
+  wallet: StellarWallet,
+  contractId: string,
+  stageId: number,
+  quantity = 1,
+  onChunkConfirmed?: (chunk: ConfirmedStageMintChunk) => Promise<void> | void,
+) {
   if (!contractId) throw new Error('The NFT contract is not configured')
-  const result = await invokeSoroban(contractId, 'mint_from_stage', [
-    StellarSdk.nativeToScVal(stageId, { type: 'u32' }),
-    StellarSdk.nativeToScVal(wallet.address, { type: 'address' }),
-    StellarSdk.nativeToScVal(quantity, { type: 'u32' }),
-  ], wallet)
+  if (!Number.isSafeInteger(quantity) || quantity < 1) throw new Error('Mint quantity must be a positive whole number')
+  const tokenIds: number[] = []
+  const hashes: string[] = []
   let editionStart = 0
-  let tokenIds: number[] = []
-  try {
-    const decoded = result.rawReturnValue ? scValToNative(result.rawReturnValue) : null
-    if (Array.isArray(decoded) && Array.isArray(decoded[1])) {
-      editionStart = Number(decoded[0])
-      tokenIds = decoded[1].map(Number)
+  let remaining = quantity
+  let chunkSize = quantity
+
+  while (remaining > 0) {
+    let currentChunk = Math.min(remaining, chunkSize)
+    while (true) {
+      const account = await getSourceAccount(wallet)
+      const transaction = new StellarSdk.TransactionBuilder(account, {
+        fee: StellarSdk.BASE_FEE,
+        networkPassphrase: wallet.networkPassphrase || STELLAR_NETWORK_PASSPHRASE,
+      }).addOperation(new StellarSdk.Contract(contractId).call('mint_from_stage',
+        StellarSdk.nativeToScVal(stageId, { type: 'u32' }),
+        StellarSdk.nativeToScVal(wallet.address, { type: 'address' }),
+        StellarSdk.nativeToScVal(currentChunk, { type: 'u32' }),
+      ) as never).setTimeout(300).build()
+      const simulation = await server.simulateTransaction(transaction)
+      if (StellarSdk.rpc.Api.isSimulationError(simulation)) {
+        const message = simulation.error || 'Soroban could not simulate this mint'
+        if (currentChunk > 1 && isSorobanResourceLimitError(message)) {
+          currentChunk = Math.max(1, Math.floor(currentChunk / 2))
+          chunkSize = currentChunk
+          continue
+        }
+        if (tokenIds.length) throw new Error(`Partial mint: ${tokenIds.length} of ${quantity} requested NFTs were confirmed. The next transaction could not be simulated: ${message}`)
+        throw new Error(message)
+      }
+
+      let result: SuccessfulResponse
+      try {
+        result = await submitPrepared(StellarSdk.rpc.assembleTransaction(transaction, simulation).build(), wallet)
+      } catch (error) {
+        const message = error instanceof Error ? error.message : 'The wallet did not complete the mint transaction'
+        if (tokenIds.length) throw new Error(`Partial mint: ${tokenIds.length} of ${quantity} requested NFTs were confirmed. The next transaction did not complete: ${message}`)
+        throw error
+      }
+      const decoded = result.rawReturnValue ? scValToNative(result.rawReturnValue) : null
+      if (!Array.isArray(decoded) || !Array.isArray(decoded[1])) {
+        if (tokenIds.length) throw new Error(`Partial mint: ${tokenIds.length} of ${quantity} requested NFTs were confirmed, but the next transaction returned no token IDs`)
+        throw new Error(`Stage mint ${result.hash} confirmed but returned no token ids`)
+      }
+      const chunk: ConfirmedStageMintChunk = {
+        editionStart: Number(decoded[0]),
+        tokenIds: decoded[1].map(Number),
+        hash: result.hash,
+      }
+      if (chunk.tokenIds.length !== currentChunk) {
+        throw new Error(`Transaction ${result.hash} confirmed ${chunk.tokenIds.length} of ${currentChunk} expected token IDs`)
+      }
+      if (!tokenIds.length) editionStart = chunk.editionStart
+      tokenIds.push(...chunk.tokenIds)
+      hashes.push(chunk.hash)
+      remaining -= chunk.tokenIds.length
+      chunkSize = currentChunk
+      await onChunkConfirmed?.(chunk)
+      break
     }
-  } catch { /* report missing return data to the mint flow */ }
-  return { editionStart, tokenIds, hash: result.hash }
+  }
+
+  return { editionStart, tokenIds, hash: hashes[0], hashes, transactionCount: hashes.length }
 }
 
 // The deployed NFT contract id for on-chain mints.
