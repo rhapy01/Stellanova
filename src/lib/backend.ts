@@ -243,6 +243,10 @@ export async function saveBrowserPushSubscription(address: string, subscription:
   })
 }
 
+export async function sendBrowserPushTest(address: string) {
+  return request<{ sent: number; failed: number }>('/api/push/test', address, { method: 'POST' })
+}
+
 export async function removeBrowserPushSubscription(address: string, endpoint: string) {
   return request<{ unsubscribed: boolean; removed: boolean }>('/api/push/subscription', address, {
     method: 'DELETE',

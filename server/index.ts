@@ -13,7 +13,7 @@ import { PutObjectCommand, S3Client } from '@aws-sdk/client-s3'
 import { checkDatabaseConnection, databaseAvailable, ensureSchema, query, readIndexerCheckpoint, withTransaction } from './db.js'
 import { indexConfirmedMint, indexerStatus, reconcileMarketplaceStateForWallet, reconcileOwnershipAgainstSoroban, runIndexerOnce, runMarketplaceKeeper, sendOfferExpiryReminders, startIndexer } from './indexer.js'
 import { mailConfigured, marketplaceEmail, sendMail, welcomeEmail } from './mail.js'
-import { browserPushConfig, notifyUser } from './push.js'
+import { browserPushConfig, notifyUser, sendBrowserPush } from './push.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const root = path.resolve(__dirname, '..')
@@ -1424,6 +1424,25 @@ app.post('/api/push/subscription', processRateLimit('browser-push-subscribe', 12
     res.status(201).json({ subscribed: true })
   } catch (error) {
     res.status(503).json({ error: error instanceof Error ? error.message : 'Could not save browser alerts' })
+  }
+})
+
+app.post('/api/push/test', processRateLimit('browser-push-test', 5, 10 * 60_000), requireWallet, async (_req, res) => {
+  const wallet = res.locals.wallet as string
+  if (!browserPushConfig().enabled) return res.status(503).json({ error: 'Browser alerts are not configured on the server.' })
+  try {
+    await ensureSchema()
+    const result = await sendBrowserPush(wallet, {
+      title: 'StellaNova test alert',
+      body: 'Browser alerts are reaching this device.',
+      url: '/account',
+    })
+    if (!result.subscriptions) return res.status(409).json({ error: 'No saved browser subscription was found for this wallet. Enable alerts on this device first.' })
+    if (!result.sent) return res.status(502).json({ error: 'The push service rejected the test alert. Check the server delivery log for the provider response.' })
+    res.json({ sent: result.sent, failed: result.failed })
+  } catch (error) {
+    console.error('[browser-push] test endpoint failed', error instanceof Error ? error.message : 'Unknown error')
+    res.status(503).json({ error: 'Could not send a test alert. Check the server delivery log.' })
   }
 })
 

@@ -12,8 +12,10 @@ export function browserPushConfig() {
   return { enabled: pushReady, publicKey: pushReady ? publicKey : null }
 }
 
+export type BrowserPushResult = { sent: number; failed: number; subscriptions: number; configured: boolean }
+
 export async function sendBrowserPush(wallet: string, payload: { title: string; body: string; url?: string }) {
-  if (!pushReady || !/^G[A-Z2-7]{55}$/.test(wallet)) return
+  if (!pushReady || !/^G[A-Z2-7]{55}$/.test(wallet)) return { sent: 0, failed: 0, subscriptions: 0, configured: pushReady } satisfies BrowserPushResult
   const subscriptions = await query<{ endpoint: string; p256dh: string; auth: string }[]>(
     'SELECT endpoint, p256dh, auth FROM browser_push_subscriptions WHERE LOWER(wallet_address) = LOWER(?)',
     [wallet],
@@ -23,20 +25,32 @@ export async function sendBrowserPush(wallet: string, payload: { title: string; 
     body: payload.body.slice(0, 240),
     url: payload.url && payload.url.startsWith('/') ? payload.url : '/account',
   })
-  await Promise.all(subscriptions.map(async (subscription) => {
+  const outcomes = await Promise.all(subscriptions.map(async (subscription) => {
     try {
       await webpush.sendNotification(
         { endpoint: subscription.endpoint, keys: { p256dh: subscription.p256dh, auth: subscription.auth } },
         message,
         { TTL: 3600, urgency: 'normal' },
       )
+      return true
     } catch (error) {
       const statusCode = Number((error as { statusCode?: number })?.statusCode ?? 0)
+      console.warn('[browser-push] delivery failed', {
+        statusCode,
+        message: error instanceof Error ? error.message.slice(0, 240) : 'Unknown push service error',
+      })
       if (statusCode === 404 || statusCode === 410) {
         await query('DELETE FROM browser_push_subscriptions WHERE endpoint = ?', [subscription.endpoint]).catch(() => undefined)
       }
+      return false
     }
   }))
+  return {
+    sent: outcomes.filter(Boolean).length,
+    failed: outcomes.filter((sent) => !sent).length,
+    subscriptions: subscriptions.length,
+    configured: pushReady,
+  } satisfies BrowserPushResult
 }
 
 export async function notifyUser(wallet: string, kind: string, title: string, body: string, url = '/account') {

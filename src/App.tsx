@@ -5,7 +5,7 @@ import { connectFreighter, shortenStellarAddress, STELLAR_EXPLORER_URL, type Ste
 import { deploySorobanWasm, invokeSoroban, invokeSorobanBatch, simulateSorobanRead, mintNftWithMetadata, mintFromStage, setCreatorStage, removeCreatorStage, whitelistCreatorWallet, whitelistCreatorWalletBatch, setCreatorReveal, setCreatorTokenUris, getCreatorCollectionTokenIds, getSorobanNftContractId, sendXlmTip } from './lib/deploy'
 import * as StellarSdk from '@stellar/stellar-sdk'
 import { sorobanMarketplaceConfig, sorobanServer, stellarPaymentAssets } from './lib/soroban'
-import { authenticateWallet, clearWalletSession, createPost, recordPostTip, fetchPosts, loadSocialState, fetchNftSocial, fetchNftChainActivity, toggleBookmarkRemote, markNotificationRead, markAllNotificationsRead, fetchNotifications, fetchBrowserPushConfig, saveBrowserPushSubscription, removeBrowserPushSubscription, fetchReferralSummary, respondToMarketplaceOffer, postCommentRemote, postToPost, toggleCollectionLike, toggleCollectionDislike, commentOnCollection, fetchCollectionSocial, toggleCreatorFollow, toggleDislikeRemote, toggleLikeRemote, togglePostDislike, togglePostLike, toggleSubscriptionRemote, fetchOwnedNfts, fetchOwnedMintedNfts, fetchAccount, updateProfile, createCollection, updateCollectionProfile, registerNftContract, recordMintedNft, getPendingMintRecords, flushPendingMints, fetchMintedNfts, fetchMarketplaceState, fetchActiveMarketplaceListings, fetchActiveMarketplaceAuctions, fetchActiveMarketplaceCollectionOffers, fetchActiveMarketplaceTraitOffers, fetchCollectionDrop, fetchMintEligibility, createMintStage, updateMintStageMetadata, publishMintStage, deleteMintStage, addWhitelistEntries, removeWhitelistEntry, updateCollectionReveal, fetchCollectionRevealMetadata, fetchPublicCollections, fetchCollectionMintHistory, fetchCreatorProfiles, fetchPublicCreatorProfile, fetchCollectionStories, createCollectionStory, createCreatorStory, markStoryViewed, fetchCollectionDropDraft, saveCollectionDropDraft, clearCollectionDropDraft, fetchCollectionDropResetPlan, fetchAnalyticsOverview, fetchOpsHealth, fetchOpsReconciliation, runOpsReconciliation, createTrackedShareUrl, fetchPublicFeedback, submitPublicFeedback, type PublicFeedbackEntry, type AnalyticsSnapshot, type CollectionDropDraft, type CollectionDropDraftStage, type MarketplaceOffer, type MarketplaceAuction, type MarketplaceCollectionOffer, type MarketplaceTraitOffer, type CollectionStoryGroup, type NotificationRecord, type PostRecord, type SocialComment, type CollectionSocialRecord, type UserAccount, type WalletCollection, type MintedNft, type MintRecordInput, type MarketplaceState, type MarketplaceListing, type MintEligibility, type MintEligibilityStage, type CollectionDrop, type MintStage, type PublicCreatorProfile, type CollectionMintHistoryEntry, type NftChainActivityEntry } from './lib/backend'
+import { authenticateWallet, clearWalletSession, createPost, recordPostTip, fetchPosts, loadSocialState, fetchNftSocial, fetchNftChainActivity, toggleBookmarkRemote, markNotificationRead, markAllNotificationsRead, fetchNotifications, fetchBrowserPushConfig, saveBrowserPushSubscription, removeBrowserPushSubscription, sendBrowserPushTest, fetchReferralSummary, respondToMarketplaceOffer, postCommentRemote, postToPost, toggleCollectionLike, toggleCollectionDislike, commentOnCollection, fetchCollectionSocial, toggleCreatorFollow, toggleDislikeRemote, toggleLikeRemote, togglePostDislike, togglePostLike, toggleSubscriptionRemote, fetchOwnedNfts, fetchOwnedMintedNfts, fetchAccount, updateProfile, createCollection, updateCollectionProfile, registerNftContract, recordMintedNft, getPendingMintRecords, flushPendingMints, fetchMintedNfts, fetchMarketplaceState, fetchActiveMarketplaceListings, fetchActiveMarketplaceAuctions, fetchActiveMarketplaceCollectionOffers, fetchActiveMarketplaceTraitOffers, fetchCollectionDrop, fetchMintEligibility, createMintStage, updateMintStageMetadata, publishMintStage, deleteMintStage, addWhitelistEntries, removeWhitelistEntry, updateCollectionReveal, fetchCollectionRevealMetadata, fetchPublicCollections, fetchCollectionMintHistory, fetchCreatorProfiles, fetchPublicCreatorProfile, fetchCollectionStories, createCollectionStory, createCreatorStory, markStoryViewed, fetchCollectionDropDraft, saveCollectionDropDraft, clearCollectionDropDraft, fetchCollectionDropResetPlan, fetchAnalyticsOverview, fetchOpsHealth, fetchOpsReconciliation, runOpsReconciliation, createTrackedShareUrl, fetchPublicFeedback, submitPublicFeedback, type PublicFeedbackEntry, type AnalyticsSnapshot, type CollectionDropDraft, type CollectionDropDraftStage, type MarketplaceOffer, type MarketplaceAuction, type MarketplaceCollectionOffer, type MarketplaceTraitOffer, type CollectionStoryGroup, type NotificationRecord, type PostRecord, type SocialComment, type CollectionSocialRecord, type UserAccount, type WalletCollection, type MintedNft, type MintRecordInput, type MarketplaceState, type MarketplaceListing, type MintEligibility, type MintEligibilityStage, type CollectionDrop, type MintStage, type PublicCreatorProfile, type CollectionMintHistoryEntry, type NftChainActivityEntry } from './lib/backend'
 import { trackProductEvent } from './lib/product-analytics'
 import { MediaAdmin } from './admin-media'
 import { useStellarAuth } from './lib/privy-auth'
@@ -236,6 +236,7 @@ function App() {
   const notificationsOpen = openPopover === 'notifications'
   const [browserPushState, setBrowserPushState] = useState<'unsupported' | 'off' | 'on' | 'denied'>(() => !('serviceWorker' in navigator) || !('PushManager' in window) || !('Notification' in window) ? 'unsupported' : Notification.permission === 'denied' ? 'denied' : 'off')
   const [browserPushBusy, setBrowserPushBusy] = useState(false)
+  const [browserPushTestBusy, setBrowserPushTestBusy] = useState(false)
   const navMenuOpen = openPopover === 'mobile-menu'
   const studioNavOpen = openPopover === 'studios'
   const creativeNavOpen = openPopover === 'creative'
@@ -786,6 +787,19 @@ function App() {
       notify(error instanceof Error ? error.message : 'Could not update browser alerts')
     } finally {
       setBrowserPushBusy(false)
+    }
+  }
+
+  const handleBrowserPushTest = async () => {
+    if (!stellarWallet || browserPushTestBusy) return
+    setBrowserPushTestBusy(true)
+    try {
+      const result = await sendBrowserPushTest(stellarWallet.address)
+      notify(result.failed ? `Push service accepted ${result.sent} alert(s); ${result.failed} delivery failed.` : `Push service accepted the test for ${result.sent} device(s). Check this phone’s notification shade.`)
+    } catch (error) {
+      notify(error instanceof Error ? error.message : 'Could not send a test browser alert')
+    } finally {
+      setBrowserPushTestBusy(false)
     }
   }
 
@@ -2034,7 +2048,10 @@ function App() {
             <div className="notification-popover__header"><b>Notifications</b><button type="button" onClick={() => void handleMarkAllRead()} disabled={unreadCount === 0}>Mark all read</button></div>
             <div className="notification-browser-alerts">
               <span><b>Browser alerts</b><small>{browserPushState === 'on' ? 'Likes, collection mints, and marketplace activity' : browserPushState === 'denied' ? 'Allow notifications in your browser settings' : browserPushState === 'unsupported' ? 'Not supported by this browser' : 'Get important activity even when StellaNova is closed'}</small></span>
-              {(browserPushState === 'on' || browserPushState === 'off') && <button type="button" onClick={() => void handleBrowserPushToggle()} disabled={browserPushBusy || !stellarWallet}>{browserPushBusy ? 'Saving…' : browserPushState === 'on' ? 'Turn off' : 'Enable'}</button>}
+              <div className="notification-browser-alerts__actions">
+                {(browserPushState === 'on' || browserPushState === 'off') && <button type="button" onClick={() => void handleBrowserPushToggle()} disabled={browserPushBusy || !stellarWallet}>{browserPushBusy ? 'Saving…' : browserPushState === 'on' ? 'Turn off' : 'Enable'}</button>}
+                {browserPushState === 'on' && <button type="button" onClick={() => void handleBrowserPushTest()} disabled={browserPushTestBusy || !stellarWallet}>{browserPushTestBusy ? 'Sending…' : 'Send test alert'}</button>}
+              </div>
             </div>
             {notifications.length ? notifications.slice(0, 6).map((note) => (
               <button className={`notification-item ${!note.read_at ? 'is-unread' : ''}`} key={`${note.id}-${note.created_at}-${note.title}-${note.body}`} onClick={() => handleNotificationClick(note)}>
