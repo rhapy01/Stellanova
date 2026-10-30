@@ -1,10 +1,10 @@
-import { useEffect, useRef, useState, type PointerEvent } from 'react'
+import { useEffect, useMemo, useRef, useState, type PointerEvent } from 'react'
 import { GifWriter } from 'omggif'
 import type { WalletCollection } from './lib/backend'
 import { loadStudioDraft, saveStudioDraft } from './lib/studio-drafts'
 import { Avatar, Button, Icon } from './ui'
 
-export type StudioMintInput = { title: string; description: string; traits: string; artwork: File; animation: File | null; collectionId: string; provenanceSource?: 'pixel-studio' | 'ai-studio' | 'painter-studio' }
+export type StudioMintInput = { title: string; description: string; traits: string; artwork: File; animation: File | null; collectionId: string; provenanceSource?: 'pixel-studio' | 'ai-studio' | 'painter-studio' | 'collage-studio' }
 export type StudioMintSuccess = { tokenId: number; title: string; image: string; contractId: string; txHash: string; indexed?: boolean }
 type SharedProps = { collections: WalletCollection[]; busy: boolean; error: string; success: StudioMintSuccess | null; onMint: (draft: StudioMintInput) => Promise<void>; onHome: () => void }
 
@@ -33,7 +33,8 @@ function ArtworkPreview({ file }: { file: File }) {
   return url ? <img src={url} alt="AI generated NFT preview" /> : <span>Loading preview…</span>
 }
 
-type PixelDraft = { size?: number; width?: number; height?: number; frames: number[][]; color: number; colors?: string[]; backgroundColor?: string; frameDelayMs?: number; fitArtwork?: boolean }
+type PixelLayer = { id: string; name: string; visible: boolean; frames: number[][] }
+type PixelDraft = { size?: number; width?: number; height?: number; frames: number[][]; layers?: PixelLayer[]; activeLayerId?: string; color: number; colors?: string[]; backgroundColor?: string; frameDelayMs?: number; fitArtwork?: boolean; onionSkin?: boolean }
 const defaultColors = ['#ffffff', '#17141d', '#eb4a68', '#ff9c38', '#f7da55', '#62bf61', '#35c7b4', '#3689ef', '#7554e9', '#d948c5', '#f2a8c6', '#9b6541', '#9298a5', '#a6d975', '#79dbeb', '#ffc16d']
 
 type GifColor = { index: number; r: number; g: number; b: number; count: number }
@@ -103,12 +104,13 @@ function makeGifPalette(frames: number[][], colors: string[], backgroundColor: s
   return { palette: [backgroundRgb.r << 16 | backgroundRgb.g << 8 | backgroundRgb.b, ...representatives.map((color) => color.value)], remap: (frame: number[]) => Uint8Array.from(frame, (index) => index === 0 ? 0 : indices.get(index) ?? 0) }
 }
 
-function paintPixel(canvas: HTMLCanvasElement, frame: number[], width: number, height: number, showGrid = true, colors: string[] = defaultColors, backgroundColor = '#ffffff') {
+function paintPixel(canvas: HTMLCanvasElement, frame: number[], width: number, height: number, showGrid = true, colors: string[] = defaultColors, backgroundColor = '#ffffff', onionFrame?: number[]) {
   const context = canvas.getContext('2d')
   if (!context) return
   const cellWidth = canvas.width / width
   const cellHeight = canvas.height / height
   context.fillStyle = backgroundColor; context.fillRect(0, 0, canvas.width, canvas.height)
+  if (onionFrame) { context.save(); context.globalAlpha = 0.28; onionFrame.forEach((color, index) => { if (!color) return; context.fillStyle = colors[color] ?? '#e852a1'; context.fillRect(index % width * cellWidth, Math.floor(index / width) * cellHeight, cellWidth, cellHeight) }); context.restore() }
   frame.forEach((color, index) => { if (color === 0) return; context.fillStyle = colors[color] ?? '#17141d'; context.fillRect(index % width * cellWidth, Math.floor(index / width) * cellHeight, cellWidth, cellHeight) })
   if (showGrid) {
     context.strokeStyle = 'rgba(32,25,40,.14)'; context.lineWidth = 1
@@ -171,10 +173,11 @@ function canvasPoint(event: PointerEvent<HTMLCanvasElement>, width: number, heig
   return y * width + x
 }
 
-export function PixelStudioPage({ collections, busy, error, success, onMint, onHome }: SharedProps) {
+export function PixelStudioPage({ collections, busy, error, success, onMint, onHome, onPostToFeed }: SharedProps & { onPostToFeed: (artwork: File, caption: string) => void }) {
   const [width, setWidth] = useState(32)
   const [height, setHeight] = useState(32)
-  const [frames, setFrames] = useState<number[][]>(() => [Array(1024).fill(0)])
+  const [layers, setLayers] = useState<PixelLayer[]>(() => [{ id: 'layer-1', name: 'Artwork', visible: true, frames: [Array(1024).fill(0)] }])
+  const [activeLayerId, setActiveLayerId] = useState('layer-1')
   const [frameIndex, setFrameIndex] = useState(0)
   const [color, setColor] = useState(1)
   const [colors, setColors] = useState<string[]>(defaultColors)
@@ -187,23 +190,33 @@ export function PixelStudioPage({ collections, busy, error, success, onMint, onH
   const [collectionId, setCollectionId] = useState('')
   const [playing, setPlaying] = useState(false)
   const [frameDelayMs, setFrameDelayMs] = useState(150)
+  const [onionSkin, setOnionSkin] = useState(false)
   const [draftStatus, setDraftStatus] = useState('')
   const [draftReady, setDraftReady] = useState(false)
   const [mintDetailsOpen, setMintDetailsOpen] = useState(false)
-  const [history, setHistory] = useState<{ frames: number[][]; index: number; width: number; height: number }[]>([])
-  const [future, setFuture] = useState<{ frames: number[][]; index: number; width: number; height: number }[]>([])
+  const [history, setHistory] = useState<{ layers: PixelLayer[]; index: number; width: number; height: number }[]>([])
+  const [future, setFuture] = useState<{ layers: PixelLayer[]; index: number; width: number; height: number }[]>([])
   const canvas = useRef<HTMLCanvasElement>(null)
   const drawing = useRef(false)
+  const frameCount = Math.max(1, ...layers.map((layer) => layer.frames.length))
+  const frames = useMemo(() => Array.from({ length: frameCount }, (_, index) => {
+    const composite = Array(width * height).fill(0)
+    for (const layer of layers) if (layer.visible) (layer.frames[index] ?? []).forEach((pixel, cell) => { if (pixel) composite[cell] = pixel })
+    return composite
+  }), [frameCount, layers, width, height])
   const active = frames[frameIndex] ?? []
   const artworkFrame = fitArtwork ? fitPixelFrames(frames, width, height) : { frames, width, height }
 
   useEffect(() => { if (success) setMintDetailsOpen(false) }, [success])
-  useEffect(() => { let mounted = true; void loadStudioDraft<PixelDraft>('pixel').then((draft) => { if (!mounted || !draft) return; const legacySize = draft.size ?? 32; setWidth(draft.width ?? legacySize); setHeight(draft.height ?? legacySize); setFrames(draft.frames); setColor(Math.max(1, draft.color)); setColors(draft.colors?.length ? draft.colors : defaultColors); setBackgroundColor(draft.backgroundColor ?? '#ffffff'); setFrameDelayMs(draft.frameDelayMs ?? 150); setFitArtwork(draft.fitArtwork ?? true); setFrameIndex(0) }).catch(() => {}).finally(() => { if (mounted) setDraftReady(true) }); return () => { mounted = false } }, [])
-  useEffect(() => { if (canvas.current) paintPixel(canvas.current, active, width, height, true, colors, backgroundColor) }, [active, width, height, colors, backgroundColor])
+  useEffect(() => { let mounted = true; void loadStudioDraft<PixelDraft>('pixel').then((draft) => { if (!mounted || !draft) return; const legacySize = draft.size ?? 32; const draftWidth = draft.width ?? legacySize; const draftHeight = draft.height ?? legacySize; setWidth(draftWidth); setHeight(draftHeight); const restoredLayers = draft.layers?.length ? draft.layers : [{ id: 'layer-1', name: 'Artwork', visible: true, frames: draft.frames }]; setLayers(restoredLayers); setActiveLayerId(restoredLayers.some((layer) => layer.id === draft.activeLayerId) ? draft.activeLayerId! : restoredLayers[restoredLayers.length - 1].id); setColor(Math.max(1, draft.color)); setColors(draft.colors?.length ? draft.colors : defaultColors); setBackgroundColor(draft.backgroundColor ?? '#ffffff'); setFrameDelayMs(draft.frameDelayMs ?? 150); setFitArtwork(draft.fitArtwork ?? true); setOnionSkin(draft.onionSkin ?? false); setFrameIndex(0) }).catch(() => {}).finally(() => { if (mounted) setDraftReady(true) }); return () => { mounted = false } }, [])
+  const previousFrame = frameIndex > 0 ? frames[frameIndex - 1] : undefined
+  useEffect(() => { if (canvas.current) paintPixel(canvas.current, active, width, height, true, colors, backgroundColor, onionSkin ? previousFrame : undefined) }, [active, width, height, colors, backgroundColor, onionSkin, previousFrame])
 
   const editPixel = (index: number) => {
     if (tool === 'picker') { if (active[index] > 0) setColor(active[index]); setTool('pencil'); return }
-    setFrames((previous) => previous.map((pixels, itemIndex) => {
+    setLayers((previous) => previous.map((layer) => {
+      if (layer.id !== activeLayerId) return layer
+      const layerFrames = layer.frames.map((pixels, itemIndex) => {
       if (itemIndex !== frameIndex) return pixels
       const nextColor = tool === 'eraser' ? 0 : color
       if (tool === 'fill') {
@@ -214,12 +227,15 @@ export function PixelStudioPage({ collections, busy, error, success, onMint, onH
       }
       if (pixels[index] === nextColor) return pixels
       const next = pixels.slice(); next[index] = nextColor; return next
+      })
+      return { ...layer, frames: layerFrames }
     }))
   }
-  const remember = () => { setHistory((items) => [...items.slice(-49), { frames: frames.map((pixels) => pixels.slice()), index: frameIndex, width, height }]); setFuture([]) }
-  const undo = () => { const previous = history[history.length - 1]; if (!previous) return; setFuture((items) => [...items, { frames: frames.map((pixels) => pixels.slice()), index: frameIndex, width, height }]); setFrames(previous.frames); setFrameIndex(previous.index); setWidth(previous.width); setHeight(previous.height); setHistory((items) => items.slice(0, -1)) }
-  const redo = () => { const next = future[future.length - 1]; if (!next) return; setHistory((items) => [...items, { frames: frames.map((pixels) => pixels.slice()), index: frameIndex, width, height }]); setFrames(next.frames); setFrameIndex(next.index); setWidth(next.width); setHeight(next.height); setFuture((items) => items.slice(0, -1)) }
-  const changeSize = (value: string) => { const [nextWidth, nextHeight] = value.split('x').map(Number); if (window.confirm('Changing the grid will clear the current animation frames. Continue?')) { remember(); setWidth(nextWidth); setHeight(nextHeight); setFrames([Array(nextWidth * nextHeight).fill(0)]); setFrameIndex(0); setPlaying(false) } }
+  // Layer updates are immutable, so history can retain prior snapshots without copying every pixel.
+  const remember = () => { setHistory((items) => [...items.slice(-49), { layers, index: frameIndex, width, height }]); setFuture([]) }
+  const undo = () => { const previous = history[history.length - 1]; if (!previous) return; setFuture((items) => [...items, { layers, index: frameIndex, width, height }]); setLayers(previous.layers); setFrameIndex(previous.index); setWidth(previous.width); setHeight(previous.height); setHistory((items) => items.slice(0, -1)) }
+  const redo = () => { const next = future[future.length - 1]; if (!next) return; setHistory((items) => [...items, { layers, index: frameIndex, width, height }]); setLayers(next.layers); setFrameIndex(next.index); setWidth(next.width); setHeight(next.height); setFuture((items) => items.slice(0, -1)) }
+  const changeSize = (value: string) => { const [nextWidth, nextHeight] = value.split('x').map(Number); if (window.confirm('Changing the grid will clear the current animation frames. Continue?')) { remember(); setWidth(nextWidth); setHeight(nextHeight); setLayers((items) => items.map((layer) => ({ ...layer, frames: [Array(nextWidth * nextHeight).fill(0)] }))); setFrameIndex(0); setPlaying(false) } }
   const selectColor = (hex: string) => {
     const normalized = hex.toLowerCase()
     const existing = colors.findIndex((entry, index) => index > 0 && entry === normalized)
@@ -228,16 +244,38 @@ export function PixelStudioPage({ collections, busy, error, success, onMint, onH
   }
   const rotateFrames = () => {
     remember()
-    setFrames((current) => current.map((frame) => {
+    setLayers((current) => current.map((layer) => ({ ...layer, frames: layer.frames.map((frame) => {
       const rotated = Array(width * height).fill(0)
       for (let y = 0; y < height; y += 1) for (let x = 0; x < width; x += 1) rotated[x * height + (height - 1 - y)] = frame[y * width + x]
       return rotated
-    }))
+    }) })))
     setWidth(height); setHeight(width)
   }
-  const addFrame = (duplicate: boolean) => { if (frames.length >= 30) return; remember(); const next = duplicate ? active.slice() : Array(width * height).fill(0); setFrames((current) => [...current, next]); setFrameIndex(frames.length); setPlaying(false) }
-  const deleteFrame = () => { if (frames.length <= 1) { setFrames([Array(width * height).fill(0)]); setFrameIndex(0); return }; remember(); setFrames((current) => current.filter((_, index) => index !== frameIndex)); setFrameIndex((index) => Math.min(index, frames.length - 2)); setPlaying(false) }
-  const saveDraft = async () => { setDraftStatus('Saving for later…'); try { await saveStudioDraft('pixel', { width, height, frames, color, colors, backgroundColor, frameDelayMs, fitArtwork } satisfies PixelDraft); setDraftStatus('Saved for later on this device. Reopen Pixel Studio to continue.') } catch { setDraftStatus('Could not save artwork for later on this device.') } }
+  const addFrame = (duplicate: boolean) => { if (frames.length >= 30) return; remember(); setLayers((current) => current.map((layer) => ({ ...layer, frames: [...layer.frames, duplicate ? (layer.frames[frameIndex] ?? Array(width * height).fill(0)).slice() : Array(width * height).fill(0)] }))); setFrameIndex(frames.length); setPlaying(false) }
+  const deleteFrame = () => { if (frames.length <= 1) { remember(); setLayers((current) => current.map((layer) => ({ ...layer, frames: [Array(width * height).fill(0)] }))); setFrameIndex(0); return }; remember(); setLayers((current) => current.map((layer) => ({ ...layer, frames: layer.frames.filter((_, index) => index !== frameIndex) }))); setFrameIndex((index) => Math.min(index, frames.length - 2)); setPlaying(false) }
+  const addLayer = () => { if (layers.length >= 12) return; remember(); const layer = { id: `layer-${Date.now()}`, name: `Layer ${layers.length + 1}`, visible: true, frames: Array.from({ length: frames.length }, () => Array(width * height).fill(0)) }; setLayers((items) => [...items, layer]); setActiveLayerId(layer.id) }
+  const duplicateLayer = () => { if (layers.length >= 12) return; const current = layers.find((layer) => layer.id === activeLayerId); if (!current) return; remember(); const layer = { ...current, id: `layer-${Date.now()}`, name: `${current.name} copy`, frames: current.frames.map((frame) => frame.slice()) }; const index = layers.findIndex((item) => item.id === activeLayerId); setLayers((items) => [...items.slice(0, index + 1), layer, ...items.slice(index + 1)]); setActiveLayerId(layer.id) }
+  const deleteLayer = () => { if (layers.length <= 1) return; remember(); const index = layers.findIndex((layer) => layer.id === activeLayerId); setLayers((items) => items.filter((layer) => layer.id !== activeLayerId)); setActiveLayerId(layers[Math.max(0, index - 1)]?.id ?? layers[0].id) }
+  const moveLayer = (id: string, direction: -1 | 1) => { const index = layers.findIndex((layer) => layer.id === id); const next = index + direction; if (index < 0 || next < 0 || next >= layers.length) return; remember(); const reordered = layers.slice(); [reordered[index], reordered[next]] = [reordered[next], reordered[index]]; setLayers(reordered); setActiveLayerId(id) }
+  const saveDraft = async () => { setDraftStatus('Saving for later…'); try { await saveStudioDraft('pixel', { width, height, frames, layers, activeLayerId, color, colors, backgroundColor, frameDelayMs, fitArtwork, onionSkin } satisfies PixelDraft); setDraftStatus('Saved for later on this device. Reopen Pixel Studio to continue.') } catch { setDraftStatus('Could not save artwork for later on this device.') } }
+  const exportSpriteSheet = async () => {
+    const finalFrame = fitArtwork ? fitPixelFrames(frames, width, height) : { frames, width, height }
+    const tile = document.createElement('canvas'); tile.width = finalFrame.width * 16; tile.height = finalFrame.height * 16
+    const sheet = document.createElement('canvas'); sheet.width = tile.width * finalFrame.frames.length; sheet.height = tile.height
+    const context = sheet.getContext('2d'); if (!context) return
+    finalFrame.frames.forEach((frame, index) => { paintPixel(tile, frame, finalFrame.width, finalFrame.height, false, colors, backgroundColor); context.drawImage(tile, index * tile.width, 0) })
+    const blob = await new Promise<Blob | null>((resolve) => sheet.toBlob(resolve, 'image/png')); if (!blob) return
+    const fileName = `${(title.trim() || 'pixel-art').toLowerCase().replace(/[^a-z0-9]+/g, '-')}-spritesheet.png`
+    const file = new File([blob], fileName, { type: 'image/png' }); const url = URL.createObjectURL(file); const anchor = document.createElement('a'); anchor.href = url; anchor.download = fileName; anchor.click(); URL.revokeObjectURL(url)
+  }
+  const postPixelArt = async () => {
+    const finalFrame = fitArtwork ? fitPixelFrames(frames, width, height) : { frames, width, height }
+    const output = document.createElement('canvas'); output.width = finalFrame.width * 16; output.height = finalFrame.height * 16
+    paintPixel(output, finalFrame.frames[0], finalFrame.width, finalFrame.height, false, colors, backgroundColor)
+    const blob = await new Promise<Blob | null>((resolve) => output.toBlob(resolve, 'image/png'))
+    if (!blob) return
+    onPostToFeed(new File([blob], `${(title.trim() || 'pixel-art').toLowerCase().replace(/[^a-z0-9]+/g, '-')}.png`, { type: 'image/png' }), [title.trim(), description.trim()].filter(Boolean).join('\n\n') || 'Original pixel art created in StellaNova Pixel Studio')
+  }
   const mintDraft = async () => {
     if (!title.trim() || !draftReady) return
     const finalFrame = fitArtwork ? fitPixelFrames(frames, width, height) : { frames, width, height }
@@ -262,16 +300,17 @@ export function PixelStudioPage({ collections, busy, error, success, onMint, onH
     <header className="creator-studio-heading"><button className="back-link" onClick={onHome}><Icon name="arrow" size={15} /> Create</button><span className="eyebrow">PIXEL STUDIO · {frames.length > 1 ? 'ANIMATED ARTWORK' : 'STATIC OR ANIMATED ARTWORK'}</span><h1>Make it pixel by pixel.</h1><p>Draw, animate, and save your artwork. Add NFT details when you are ready to mint.</p></header>
     {success && <StudioSuccess success={success} />}
     <div className="pixel-studio-layout"><section className="pixel-studio-editor">
-      <div className="pixel-studio-toolbar"><div className="pixel-studio-tools">{(['pencil', 'eraser', 'fill', 'picker'] as const).map((item) => <button key={item} className={tool === item ? 'is-active' : ''} onClick={() => setTool(item)} aria-label={item} title={item}>{item === 'pencil' ? '✎' : item === 'eraser' ? '▱' : item === 'fill' ? '▨' : '◉'}<span>{item}</span></button>)}</div><label className="pixel-size-control">Grid <select value={`${width}x${height}`} onChange={(event) => changeSize(event.target.value)}><option value="16x16">16 × 16 · square</option><option value="32x32">32 × 32 · square</option><option value="64x64">64 × 64 · square</option><option value="64x32">64 × 32 · landscape</option><option value="96x48">96 × 48 · landscape</option><option value="128x64">128 × 64 · landscape</option><option value="128x32">128 × 32 · wide lettering</option></select></label><button disabled={!history.length} onClick={undo}>Undo</button><button disabled={!future.length} onClick={redo}>Redo</button><button onClick={rotateFrames}>Rotate all 90°</button><button onClick={() => { remember(); setFrames((items) => items.map((pixels, index) => index === frameIndex ? Array(width * height).fill(0) : pixels)) }}>Clear frame</button></div>
+      <div className="pixel-studio-toolbar"><div className="pixel-studio-tools">{(['pencil', 'eraser', 'fill', 'picker'] as const).map((item) => <button key={item} className={tool === item ? 'is-active' : ''} onClick={() => setTool(item)} aria-label={item} title={item}>{item === 'pencil' ? '✎' : item === 'eraser' ? '▱' : item === 'fill' ? '▨' : '◉'}<span>{item}</span></button>)}</div><label className="pixel-size-control">Grid <select value={`${width}x${height}`} onChange={(event) => changeSize(event.target.value)}><option value="16x16">16 × 16 · square</option><option value="32x32">32 × 32 · square</option><option value="64x64">64 × 64 · square</option><option value="64x32">64 × 32 · landscape</option><option value="96x48">96 × 48 · landscape</option><option value="128x64">128 × 64 · landscape</option><option value="128x32">128 × 32 · wide lettering</option></select></label><button disabled={!history.length} onClick={undo}>Undo</button><button disabled={!future.length} onClick={redo}>Redo</button><button onClick={rotateFrames}>Rotate all 90°</button><button onClick={() => { remember(); setLayers((items) => items.map((layer) => layer.id === activeLayerId ? { ...layer, frames: layer.frames.map((pixels, index) => index === frameIndex ? Array(width * height).fill(0) : pixels) } : layer)) }}>Clear active layer</button></div>
       <div className="pixel-studio-canvas-wrap" style={{ aspectRatio: `${width} / ${height}` }}><canvas ref={canvas} width={width * 16} height={height * 16} onPointerDown={(event) => { drawing.current = true; event.currentTarget.setPointerCapture(event.pointerId); if (tool !== 'picker') remember(); editPixel(canvasPoint(event, width, height)) }} onPointerMove={(event) => { if (drawing.current && tool !== 'fill' && tool !== 'picker') editPixel(canvasPoint(event, width, height)) }} onPointerUp={() => { drawing.current = false }} onPointerCancel={() => { drawing.current = false }} aria-label={`Pixel art frame ${frameIndex + 1}`} /></div>
+      <section className="pixel-layer-panel" aria-label="Artwork layers"><div className="pixel-layer-panel__heading"><b>Layers <small>{layers.length}/12</small></b><div><button type="button" onClick={addLayer} disabled={layers.length >= 12}>+ Layer</button><button type="button" onClick={duplicateLayer} disabled={layers.length >= 12}>Duplicate</button><button type="button" onClick={deleteLayer} disabled={layers.length <= 1}>Delete</button></div></div><div className="pixel-layer-list">{layers.map((layer, index) => <div key={layer.id} className={layer.id === activeLayerId ? 'is-active' : ''}><input type="checkbox" aria-label={`Show ${layer.name}`} checked={layer.visible} onChange={(event) => { remember(); setLayers((items) => items.map((item) => item.id === layer.id ? { ...item, visible: event.target.checked } : item)) }} /><button type="button" className="pixel-layer-list__select" onClick={() => setActiveLayerId(layer.id)}>{layer.name}</button><input aria-label={`Rename ${layer.name}`} value={layer.name} maxLength={36} onChange={(event) => setLayers((items) => items.map((item) => item.id === layer.id ? { ...item, name: event.target.value } : item))} /><button type="button" aria-label={`Move ${layer.name} up`} disabled={index === layers.length - 1} onClick={() => moveLayer(layer.id, 1)}>↑</button><button type="button" aria-label={`Move ${layer.name} down`} disabled={index === 0} onClick={() => moveLayer(layer.id, -1)}>↓</button></div>)}</div></section>
       <div className="pixel-studio-bottom"><div className="pixel-color-controls"><div className="pixel-color-picker"><label htmlFor="pixel-color-picker">Pixel color</label><input id="pixel-color-picker" type="color" value={colors[color] ?? '#17141d'} onChange={(event) => selectColor(event.target.value)} /><span>{colors[color]?.toUpperCase() ?? '#17141D'}</span></div><div className="pixel-color-picker"><label htmlFor="pixel-background-picker">Background</label><input id="pixel-background-picker" type="color" value={backgroundColor} onChange={(event) => setBackgroundColor(event.target.value)} /><span>{backgroundColor.toUpperCase()}</span></div></div>
         <div className="pixel-frame-strip"><div className="pixel-frame-strip__head"><b>{frames.length === 1 ? 'Static artwork' : 'Animation frames'} <small>{frames.length}/30</small></b><span>Frame {frameIndex + 1}</span><label>Delay<select value={frameDelayMs} onChange={(event) => setFrameDelayMs(Number(event.target.value))} disabled={frames.length < 2}><option value={50}>50 ms</option><option value={100}>100 ms</option><option value={150}>150 ms</option><option value={200}>200 ms</option><option value={300}>300 ms</option><option value={500}>500 ms</option><option value={1000}>1 s</option></select></label></div>
           <div className="pixel-frame-strip__items">{frames.map((frame, index) => <button key={index} className={index === frameIndex ? 'is-active' : ''} onClick={() => setFrameIndex(index)} aria-label={`Edit frame ${index + 1}`}><PixelFrameThumbnail frame={frame} width={width} height={height} colors={colors} backgroundColor={backgroundColor} /><small>{index + 1}</small></button>)}<button className="pixel-frame-strip__add" onClick={() => addFrame(false)} disabled={frames.length >= 30} aria-label="Add blank frame">＋</button></div>
-          <div className="pixel-frame-strip__actions">{frames.length === 1 && <button className="pixel-frame-strip__animate" onClick={() => addFrame(true)}>Animate this artwork</button>}{frames.length > 1 && <><button onClick={() => addFrame(true)} disabled={frames.length >= 30}>Duplicate frame</button><button onClick={() => deleteFrame()}>Delete frame</button><button onClick={() => setPlaying((value) => !value)}>{playing ? 'Pause preview' : '▶ Preview animation'}</button></>}</div>
+          <div className="pixel-frame-strip__actions">{frames.length === 1 && <button className="pixel-frame-strip__animate" onClick={() => addFrame(true)}>Animate this artwork</button>}{frames.length > 1 && <><button onClick={() => addFrame(true)} disabled={frames.length >= 30}>Duplicate frame</button><button onClick={() => deleteFrame()}>Delete frame</button><button onClick={() => setPlaying((value) => !value)}>{playing ? 'Pause preview' : '▶ Preview animation'}</button><label className="pixel-onion-toggle"><input type="checkbox" checked={onionSkin} onChange={(event) => setOnionSkin(event.target.checked)} /> Onion skin previous frame</label></>}</div>
         </div>
       </div>
     </section>
-    <aside className="pixel-studio-sidebar"><div className="studio-actions"><b>{frames.length > 1 ? 'Animated artwork preview' : 'Static artwork preview'}</b><div className="pixel-animation-preview" style={{ aspectRatio: `${artworkFrame.width} / ${artworkFrame.height}` }}><PixelAnimationPreview frames={artworkFrame.frames} width={artworkFrame.width} height={artworkFrame.height} delayMs={frameDelayMs} playing={playing} colors={colors} backgroundColor={backgroundColor} /></div><label className="pixel-fit-option"><input type="checkbox" checked={fitArtwork} onChange={(event) => setFitArtwork(event.target.checked)} /> Fit drawing to artwork</label><small>{fitArtwork ? 'Empty canvas is trimmed across all frames and the drawing is centered with crisp pixel edges.' : 'Keep the full canvas dimensions in the minted artwork.'}</small><small>{frames.length === 1 ? 'This will mint as a static PNG. Choose “Animate this artwork” to add frames and mint a GIF.' : `${frames.length} frames will mint as an animated GIF at ${frameDelayMs} ms per frame.`}</small><Button variant="outline" onClick={() => void saveDraft()} disabled={!draftReady}>Save for later</Button>{draftStatus && <small role="status">{draftStatus}</small>}<Button disabled={!draftReadyToMint || busy} onClick={() => setMintDetailsOpen(true)}>{frames.length > 1 ? 'Mint animated NFT' : 'Mint static NFT'} <Icon name="arrow" size={15} /></Button>{error && <p className="studio-error" role="alert">{error}</p>}</div></aside></div>
+    <aside className="pixel-studio-sidebar"><div className="studio-actions"><section className="studio-fields"><span className="eyebrow">ARTWORK DETAILS</span><label>Title<input value={title} maxLength={160} onChange={(event) => setTitle(event.target.value)} placeholder="Name your pixel artwork" /></label><label>Description<textarea value={description} maxLength={2000} rows={3} onChange={(event) => setDescription(event.target.value)} placeholder="Describe your artwork" /></label></section><b>{frames.length > 1 ? 'Animated artwork preview' : 'Static artwork preview'}</b><div className="pixel-animation-preview" style={{ aspectRatio: `${artworkFrame.width} / ${artworkFrame.height}` }}><PixelAnimationPreview frames={artworkFrame.frames} width={artworkFrame.width} height={artworkFrame.height} delayMs={frameDelayMs} playing={playing} colors={colors} backgroundColor={backgroundColor} /></div><label className="pixel-fit-option"><input type="checkbox" checked={fitArtwork} onChange={(event) => setFitArtwork(event.target.checked)} /> Fit drawing to artwork</label><small>{fitArtwork ? 'Empty canvas is trimmed across all frames and the drawing is centered with crisp pixel edges.' : 'Keep the full canvas dimensions in the minted artwork.'}</small><small>{frames.length === 1 ? 'This will mint as a static PNG. Choose “Animate this artwork” to add frames and mint a GIF.' : `${frames.length} frames will mint as an animated GIF at ${frameDelayMs} ms per frame.`}</small><Button variant="outline" onClick={() => void saveDraft()} disabled={!draftReady}>Save for later</Button>{draftStatus && <small role="status">{draftStatus}</small>}{frames.length > 1 && <Button variant="outline" onClick={() => void exportSpriteSheet()} disabled={!draftReady}>Export sprite sheet</Button>}<Button variant="outline" onClick={() => void postPixelArt()} disabled={!draftReady || !title.trim()}>Post artwork to feed <Icon name="arrow" size={14} /></Button><Button disabled={!draftReadyToMint || busy} onClick={() => setMintDetailsOpen(true)}>{frames.length > 1 ? 'Mint animated NFT' : 'Mint static NFT'} <Icon name="arrow" size={15} /></Button>{error && <p className="studio-error" role="alert">{error}</p>}</div></aside></div>
     {mintDetailsOpen && <MintDetailsDialog collections={collections} title={title} setTitle={setTitle} description={description} setDescription={setDescription} traits={traits} setTraits={setTraits} collectionId={collectionId} setCollectionId={setCollectionId} busy={busy} error={error} onClose={() => setMintDetailsOpen(false)} onConfirm={() => void mintDraft()} />}
   </main>
 }

@@ -1,4 +1,4 @@
-import { createContext, createElement, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react'
+import { createContext, createElement, lazy, Suspense, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react'
 import { collectionFor, collections, creatorFor, creators, nfts, sampleCollectionSlugs, type Collection, type Creator, type NFT } from './data'
 import { Avatar, Button, Icon, mediaSource, Meta, PrismMark, Toast, Verified } from './ui'
 import { connectFreighter, shortenStellarAddress, STELLAR_EXPLORER_URL, type StellarWallet } from './lib/stellar'
@@ -16,10 +16,11 @@ import { AiStudioPage, PixelStudioPage, type StudioMintInput } from './create-st
 import { AiCollectionStudioPage, getRarityTierSchedule, getRarityTierCounts, seededShuffle, type RarityTier, type TransferAsset } from './ai-collection-studio'
 import { deleteStudioDraft, loadStudioDraft, saveStudioDraft } from './lib/studio-drafts'
 import { PainterStudioPage } from './painter-studio'
+const CollagePosterStudioPage = lazy(() => import('./collage-poster-studio').then((module) => ({ default: module.CollagePosterStudioPage })))
 import { openCurrentPageInBrowser, telegramWebApp } from './lib/telegram-mini-app'
 import { CreatorServicesPage, ExhibitionsPage, PhysicalArtPage } from './creator-economy'
 
-type View = 'home' | 'explore' | 'collections' | 'saved' | 'account' | 'analytics' | 'settings' | 'feedback' | 'services' | 'physical-art' | 'exhibitions' | 'pixel-studio' | 'ai-studio' | 'ai-collection-studio' | 'painter-studio'
+type View = 'home' | 'explore' | 'collections' | 'saved' | 'account' | 'analytics' | 'settings' | 'feedback' | 'services' | 'physical-art' | 'exhibitions' | 'pixel-studio' | 'ai-studio' | 'ai-collection-studio' | 'painter-studio' | 'collage-studio'
 type Detail = { type: 'nft'; item: NFT } | { type: 'creator'; id: string } | { type: 'collection'; item: Collection }
 
 const marketTabs = ['All NFTs', 'Buy now', 'Auctions', 'Offers'] as const
@@ -94,6 +95,7 @@ function routeFromPath(path: string): { view: View; detail: Detail | null } {
   if (cleanPath === '/create/ai') return { view: 'ai-studio', detail: null }
   if (cleanPath === '/create/collection') return { view: 'ai-collection-studio', detail: null }
   if (cleanPath === '/create/painter') return { view: 'painter-studio', detail: null }
+  if (cleanPath === '/create/collage') return { view: 'collage-studio', detail: null }
   return { view: 'home', detail: null }
 }
 
@@ -180,7 +182,7 @@ function App() {
   useEffect(() => {
     const pageType = detail?.type ?? view
     trackProductEvent('page_viewed', { page_type: pageType })
-    if (view === 'pixel-studio' || view === 'ai-studio' || view === 'ai-collection-studio' || view === 'painter-studio') trackProductEvent('studio_opened', { studio: view })
+    if (view === 'pixel-studio' || view === 'ai-studio' || view === 'ai-collection-studio' || view === 'painter-studio' || view === 'collage-studio') trackProductEvent('studio_opened', { studio: view })
   }, [view, detail?.type])
   const [pendingCollectionSlug, setPendingCollectionSlug] = useState(() => {
     if (initialRoute.detail?.type === 'collection') return ''
@@ -626,7 +628,7 @@ function App() {
   useEffect(() => {
     if (window.location.pathname === '/admin/deploy') return
     if ((pendingCollectionSlug || pendingNftId) && !detail) return
-    const path = sharedPostId ? `/post/${sharedPostId}` : detail?.type === 'nft' ? `/nft/${detail.item.id}` : detail?.type === 'creator' ? `/creator/${detail.id}` : detail?.type === 'collection' ? `/collection/${detail.item.id}` : view === 'home' ? '/' : view === 'pixel-studio' ? '/create/pixel' : view === 'ai-studio' ? '/create/ai' : view === 'ai-collection-studio' ? '/create/collection' : view === 'painter-studio' ? '/create/painter' : `/${view}`
+    const path = sharedPostId ? `/post/${sharedPostId}` : detail?.type === 'nft' ? `/nft/${detail.item.id}` : detail?.type === 'creator' ? `/creator/${detail.id}` : detail?.type === 'collection' ? `/collection/${detail.item.id}` : view === 'home' ? '/' : view === 'pixel-studio' ? '/create/pixel' : view === 'ai-studio' ? '/create/ai' : view === 'ai-collection-studio' ? '/create/collection' : view === 'painter-studio' ? '/create/painter' : view === 'collage-studio' ? '/create/collage' : `/${view}`
     if (window.location.pathname !== path) window.history.pushState({ stellaNovaRoute: true }, '', path)
   }, [detail, pendingCollectionSlug, pendingNftId, sharedPostId, view])
 
@@ -2007,8 +2009,8 @@ function App() {
           <NavItem icon="compass" label="Explore" active={view === 'explore' && !detail} onClick={() => navTo('explore')} />
           <NavItem icon="grid" label="Collections" active={view === 'collections' && !detail} onClick={() => navTo('collections')} />
           <NavItem icon="plus" label="Create" active={createChooserOpen} onClick={() => setCreateChooserOpen(true)} />
-          <NavDropdown icon="spark" label="Studios" open={studioNavOpen} active={['pixel-studio', 'ai-studio', 'ai-collection-studio', 'painter-studio'].includes(view)} currentView={view} onToggle={() => togglePopover('studios')} items={[
-            ['pixel-studio', 'Pixel Studio'], ['ai-studio', 'AI Art Studio'], ['ai-collection-studio', 'AI Collection Studio'], ['painter-studio', 'Painter & Mural Studio'],
+          <NavDropdown icon="spark" label="Studios" open={studioNavOpen} active={['pixel-studio', 'ai-studio', 'ai-collection-studio', 'painter-studio', 'collage-studio'].includes(view)} currentView={view} onToggle={() => togglePopover('studios')} items={[
+            ['pixel-studio', 'Pixel Studio'], ['ai-studio', 'AI Art Studio'], ['ai-collection-studio', 'AI Collection Studio'], ['painter-studio', 'Painter & Mural Studio'], ['collage-studio', 'Poster & Collage Studio'],
           ]} onSelect={(nextView) => { navTo(nextView); setOpenPopover(null) }} />
           <NavDropdown icon="briefcase" label="Services" open={creativeNavOpen} active={['services', 'physical-art', 'exhibitions'].includes(view)} currentView={view} onToggle={() => togglePopover('creative')} items={[
             ['services', 'Services'], ['physical-art', 'Physical Art'], ['exhibitions', 'Exhibitions'],
@@ -2039,7 +2041,7 @@ function App() {
           <span className="mobile-menu-section-label">Services</span>
           {([['services', 'Services & commissions'], ['physical-art', 'Physical art'], ['exhibitions', 'Exhibitions']] as [View, string][]).map(([nextView,label]) => <button key={nextView} className={view === nextView ? 'is-active' : ''} onClick={() => { navTo(nextView); setOpenPopover(null) }}>{label}</button>)}
           <span className="mobile-menu-section-label">Creator studios</span>
-          {([['pixel-studio', 'Pixel Studio'], ['ai-studio', 'AI Art Studio'], ['ai-collection-studio', 'AI Collection Studio'], ['painter-studio', 'Painter & Mural Studio']] as [View, string][]).map(([nextView, label]) => <button key={nextView} className={`mobile-menu-studio ${view === nextView ? 'is-active' : ''}`} onClick={() => { navTo(nextView); setOpenPopover(null) }}>{label}<Icon name="arrow" size={13} /></button>)}
+          {([['pixel-studio', 'Pixel Studio'], ['ai-studio', 'AI Art Studio'], ['ai-collection-studio', 'AI Collection Studio'], ['painter-studio', 'Painter & Mural Studio'], ['collage-studio', 'Poster & Collage Studio']] as [View, string][]).map(([nextView, label]) => <button key={nextView} className={`mobile-menu-studio ${view === nextView ? 'is-active' : ''}`} onClick={() => { navTo(nextView); setOpenPopover(null) }}>{label}<Icon name="arrow" size={13} /></button>)}
           {([['analytics', 'Analytics'], ['settings', 'Settings'], ['feedback', 'Feedback']] as [View, string][]).map(([nextView, label]) => <button key={nextView} className={view === nextView ? 'is-active' : ''} onClick={() => { navTo(nextView); setOpenPopover(null) }}>{label}</button>)}
           <button type="button" onClick={() => { setOpenPopover(null); window.dispatchEvent(new Event('stellanova:install')) }}>Install StellaNova</button>
         </nav>}
@@ -2081,7 +2083,7 @@ function App() {
             {view === 'analytics' && <AnalyticsView walletAddress={stellarWallet?.address ?? ''} isAdmin={Boolean(account?.is_admin)} />}
             {view === 'settings' && <SettingsView feedPreferences={feedPreferences} setFeedPreferences={setFeedPreferences} />}
             {view === 'feedback' && <FeedbackView />}
-            {view === 'pixel-studio' && <PixelStudioPage collections={walletCollections} busy={minting} error={mintError} success={mintSuccess} onMint={handleMintNft} onHome={() => navTo('home')} />}
+            {view === 'pixel-studio' && <PixelStudioPage collections={walletCollections} busy={minting} error={mintError} success={mintSuccess} onMint={handleMintNft} onPostToFeed={postStudioArtworkToFeed} onHome={() => navTo('home')} />}
             {view === 'ai-studio' && <AiStudioPage collections={walletCollections} busy={minting} error={mintError} success={mintSuccess} onMint={handleMintNft} onGenerate={generateAiArtwork} onPostToFeed={postStudioArtworkToFeed} onHome={() => navTo('home')} />}
             {view === 'ai-collection-studio' && <AiCollectionStudioPage walletAddress={stellarWallet?.address ?? ''} onGenerate={generateAiArtwork} onAnalyze={analyzeAiArtwork} onVerifyTraits={verifyAiArtworkTraits} onPlanTraits={planAiCollectionTraits} onCreateCollection={createAiStudioCollection} onSaveArtwork={saveAiStudioArtwork} onOpenCollectionDashboard={(slug: string) => { const item = allCollections.find((collection) => collection.id === slug) ?? collectionFor(slug); setView('home'); setDetail({ type: 'collection', item }) }} onHome={() => navTo('home')} />}
             {view === 'painter-studio' && <PainterStudioPage collections={walletCollections} busy={minting} error={mintError} success={mintSuccess} onMint={handleMintNft} onPostToFeed={postStudioArtworkToFeed} onHome={() => navTo('home')} />}
@@ -2131,6 +2133,7 @@ function InstallExperience() {
     displayMode.addEventListener?.('change', displayModeChanged)
     return () => {
       window.removeEventListener('beforeinstallprompt', beforeInstall)
+            {view === 'collage-studio' && <Suspense fallback={<div className="studio-loading" role="status">Opening Poster & Collage Studio…</div>}><CollagePosterStudioPage collections={walletCollections} busy={minting} error={mintError} success={mintSuccess} onMint={handleMintNft} onPostToFeed={postStudioArtworkToFeed} onHome={() => navTo('home')} /></Suspense>}
       window.removeEventListener('appinstalled', installedHandler)
       window.removeEventListener('stellanova:install', requestInstall)
       displayMode.removeEventListener?.('change', displayModeChanged)
@@ -3923,7 +3926,7 @@ function NftProvenance({ contractId, tokenId }: { contractId?: string; tokenId?:
   const hash = (value: string | null) => value ? <code title={value}>{value}</code> : <span>Not recorded</span>
   const rows = record ? [
     ...(record.creator_wallet ? [{ label: 'Creator wallet', value: <code title={record.creator_wallet}>{shortenStellarAddress(record.creator_wallet)}</code> }] : []),
-    ...(record.creation_method ? [{ label: 'Creation workflow', value: <span>{({ 'pixel-studio': 'Pixel Studio', 'ai-studio': 'AI Art Studio', 'ai-collection-studio': 'AI Collection Studio', 'painter-studio': 'Painter & Mural Studio', 'collection-settings': 'Collection mint setup', 'quick-mint': 'Quick mint', 'creator-import': 'Creator import' } as Record<string, string>)[record.creation_method] ?? 'StellaNova creator flow'}</span> }] : []),
+    ...(record.creation_method ? [{ label: 'Creation workflow', value: <span>{({ 'pixel-studio': 'Pixel Studio', 'ai-studio': 'AI Art Studio', 'ai-collection-studio': 'AI Collection Studio', 'painter-studio': 'Painter & Mural Studio', 'collage-studio': 'Poster & Collage Studio', 'collection-settings': 'Collection mint setup', 'quick-mint': 'Quick mint', 'creator-import': 'Creator import' } as Record<string, string>)[record.creation_method] ?? 'StellaNova creator flow'}</span> }] : []),
     { label: 'Minted by', value: <code title={record.minter}>{shortenStellarAddress(record.minter)}</code> },
     { label: record.asset_sha256_verified ? 'Artwork · SHA-256 (server verified)' : 'Artwork · SHA-256 (unverified)', value: hash(record.asset_sha256) },
     ...(record.animation_sha256 ? [{ label: record.animation_sha256_verified ? 'Animation · SHA-256 (server verified)' : 'Animation · SHA-256 (unverified)', value: hash(record.animation_sha256) }] : []),

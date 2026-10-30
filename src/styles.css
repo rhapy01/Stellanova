@@ -2711,6 +2711,20 @@ body, #root, .app-shell, .main-content, .page, .detail-page { color: #1b1b20; ba
 .ai-collection-prompt-option input { width:100%; min-width:0; padding:7px; border:1px solid var(--line); border-radius:6px; color:var(--ink); background:var(--paper,#fff); font:inherit; font-size:10px; }
 .ai-collection-prompt-option label { display:grid; grid-template-columns:auto 1fr; align-items:center; gap:5px; color:var(--muted); font-size:9px; }
 .ai-collection-rarity { color:var(--violet)!important; font-weight:700; }
+.pixel-layer-panel { display:grid; gap:9px; margin-top:12px; padding:11px; border:1px solid var(--line); border-radius:10px; }
+.pixel-layer-panel__heading { display:flex; align-items:center; justify-content:space-between; gap:10px; }
+.pixel-layer-panel__heading b { font-size:12px; }
+.pixel-layer-panel__heading small { color:var(--muted); font-weight:500; }
+.pixel-layer-panel__heading > div { display:flex; flex-wrap:wrap; gap:5px; }
+.pixel-layer-panel__heading button,.pixel-layer-list button { min-height:30px; padding:4px 8px; border:1px solid var(--line); border-radius:7px; color:var(--ink); background:var(--paper,#fff); font:inherit; font-size:10px; cursor:pointer; }
+.pixel-layer-panel button:disabled { opacity:.45; cursor:not-allowed; }
+.pixel-layer-list { display:grid; gap:5px; }
+.pixel-layer-list > div { display:grid; grid-template-columns:auto minmax(55px,.6fr) minmax(70px,1fr) auto auto; align-items:center; gap:6px; min-width:0; padding:5px; border:1px solid var(--line); border-radius:8px; }
+.pixel-layer-list > div.is-active { border-color:var(--violet); background:#8b56f208; }
+.pixel-layer-list__select { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; text-align:left; }
+.pixel-layer-list input:not([type=checkbox]) { width:100%; min-width:0; height:30px; padding:4px 7px; border:1px solid var(--line); border-radius:7px; color:var(--ink); background:var(--paper,#fff); font:inherit; font-size:10px; }
+.pixel-layer-list input[type=checkbox] { margin:0; accent-color:var(--violet); }
+.pixel-layer-list button { padding-inline:7px; }
 .ai-collection-attributes { display:grid; gap:6px; font-size:11px; }
 .ai-collection-attributes summary { cursor:pointer; color:var(--ink); font-weight:600; }
 .ai-collection-attribute { display:grid; grid-template-columns:1fr 1fr 24px; gap:5px; }
@@ -3156,6 +3170,39 @@ h1, h2, h3, h4, h5, h6,
 .ai-collection-trait-value-remove { color:#bd245f; font-size:20px; }
 .ai-collection-trait-value-remove:hover { border-color:#bd245f; background:#fff7f8; }
 .ai-collection-trait-value-add { display:flex; gap:7px; padding:0 12px; }
+.collage-workspace { display:grid; grid-template-columns:minmax(0,1fr) 310px; align-items:start; gap:18px; }
+.collage-editor,.collage-inspector { min-width:0; padding:16px; border:1px solid var(--line); border-radius:16px; background:var(--paper,#fff); box-shadow:0 8px 32px #22152d0a; }
+.collage-toolbar { display:flex; flex-wrap:wrap; align-items:end; gap:7px; margin-bottom:12px; }
+.collage-toolbar button,.collage-toolbar select,.collage-upload { min-height:36px; padding:0 10px; border:1px solid var(--line); border-radius:8px; color:var(--ink); background:var(--paper,#fff); font:inherit; font-size:12px; }
+.collage-toolbar button,.collage-upload { display:inline-flex; align-items:center; cursor:pointer; }
+.collage-toolbar label:not(.collage-upload) { display:grid; gap:4px; color:var(--muted); font-size:11px; }
+.collage-upload input { display:none; }
+.collage-canvas-scroll { display:grid; max-height:74vh; min-height:300px; place-items:center; overflow:auto; padding:14px; border:1px solid var(--line); border-radius:12px; background-color:#f3f1f5; background-image:linear-gradient(45deg,#e3e0e8 25%,transparent 25%),linear-gradient(-45deg,#e3e0e8 25%,transparent 25%),linear-gradient(45deg,transparent 75%,#e3e0e8 75%),linear-gradient(-45deg,transparent 75%,#e3e0e8 75%); background-size:22px 22px; background-position:0 0,0 11px,11px -11px,-11px 0; }
+.collage-canvas-frame { width:min(100%,620px); overflow:hidden; box-shadow:0 12px 34px #23172b22; }
+.collage-canvas-frame canvas { display:block; width:100%; height:100%; touch-action:none; }
+.collage-canvas-frame .canvas-container { width:100%!important; height:100%!important; }
+.collage-canvas-frame .canvas-container canvas { width:100%!important; height:100%!important; }
+.collage-colors { display:flex; flex-wrap:wrap; align-items:center; gap:8px; padding-top:12px; }
+.collage-colors button { width:28px; height:28px; border:1px solid #0002; border-radius:50%; cursor:pointer; }
+.collage-colors label { display:flex; align-items:center; gap:6px; color:var(--muted); font-size:11px; }
+.collage-colors input { width:32px; height:28px; border:0; cursor:pointer; }
+.collage-inspector { display:grid; gap:13px; }
+.collage-inspector__head { display:flex; justify-content:space-between; align-items:center; gap:8px; }
+.collage-inspector__head small,.collage-empty-selection,.collage-layer-list small { color:var(--muted); font-size:11px; }
+.collage-inspector > label { display:grid; gap:6px; color:var(--muted); font-size:11px; }
+.collage-inspector > label input:not([type=range]),.collage-inspector > label select,.collage-inspector > label textarea { width:100%; min-width:0; padding:9px 10px; border:1px solid var(--line); border-radius:8px; color:var(--ink); background:var(--paper,#fff); font:inherit; font-size:12px; }
+.collage-inspector__actions { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:6px; }
+.collage-inspector__actions button,.collage-layer-list button { min-width:0; min-height:34px; padding:6px 9px; border:1px solid var(--line); border-radius:8px; color:var(--ink); background:var(--paper,#fff); font:inherit; font-size:11px; cursor:pointer; }
+.collage-layer-list { display:grid; gap:6px; max-height:220px; overflow:auto; padding:10px; border:1px solid var(--line); border-radius:10px; }
+.collage-layer-list > b { display:flex; justify-content:space-between; font-size:12px; }
+.collage-layer-list button { display:flex; justify-content:space-between; text-align:left; }
+.collage-layer-list button span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.collage-layer-list button.is-active { border-color:var(--violet); color:var(--violet); }
+.collage-publish { display:grid; gap:8px; }
+.collage-publish > small { color:var(--muted); font-size:11px; }
+.pixel-onion-toggle { display:inline-flex; align-items:center; gap:6px; font-size:11px; }
+@media(max-width:900px) { .collage-workspace { grid-template-columns:minmax(0,1fr); } .collage-inspector { grid-row:1; } .collage-editor { grid-row:2; } }
+@media(max-width:540px) { .collage-editor,.collage-inspector { padding:10px; } .collage-toolbar { align-items:stretch; } .collage-toolbar label:first-child { width:100%; } .collage-toolbar button,.collage-upload { flex:1 1 auto; justify-content:center; padding-inline:7px; font-size:11px; } .collage-canvas-scroll { min-height:220px; max-height:58vh; padding:7px; } }
 .ai-collection-trait-value-add input { flex:1; min-width:0; padding:8px 10px; border:1px solid var(--line); border-radius:8px; color:var(--ink); background:var(--paper,#fff); font:inherit; font-size:11px; }
 .ai-collection-trait-value-add button { width:34px; height:34px; border-color:var(--violet); color:#fff; background:var(--violet); font-size:21px; }
 .ai-collection-trait-value-add button:disabled { opacity:.45; cursor:not-allowed; }
