@@ -31,7 +31,7 @@
     "@stellar/stellar-sdk": "^17.2.1",
     "@stripe/stripe-js": "^10.0.0",
     "@vitejs/plugin-react": "latest",
-    "dotenv": "^18.0.6",
+    "dotenv": "^18.0.9",
     "express": "^5.2.1",
     "fabric": "^7.4.0",
     "fflate": "^0.8.3",
