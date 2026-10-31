@@ -207,7 +207,7 @@ try {
   if (wasmHash.length !== 32) throw new Error('WASM upload returned an invalid code hash.')
   const deployed = await submit(StellarSdk.Operation.createCustomContract({
     wasmHash, address: StellarSdk.Address.fromString(admin), salt: crypto.randomBytes(32),
-    constructorArgs: [sc(baseUri, 'string'), sc('StellaNova Editions', 'string'), sc('STNV', 'string'), sc(admin, 'address')],
+    constructorArgs: [sc(baseUri, 'string'), sc('NovaMarket Editions', 'string'), sc('STNV', 'string'), sc(admin, 'address')],
   }))
   const deployedContract = deployed.returnValue
     ? StellarSdk.scValToNative(deployed.returnValue as unknown as StellarSdk.xdr.ScVal)

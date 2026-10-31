@@ -36,7 +36,7 @@ async function main() {
       ORDER BY role
     `)
     const deployments = await db.query<{ count: number }>(`SELECT COUNT(*)::int AS count FROM nft_contract_registry WHERE network = 'TESTNET'`)
-    console.log('StellaNova SCF Testnet traction audit')
+    console.log('NovaMarket SCF Testnet traction audit')
     console.log(`Generated: ${new Date().toISOString()}`)
     console.log('Source: confirmed indexed on-chain NFT mint events.')
     console.log('Account rule: founder is @isaacxvoxel or akintoyeisaac5@gmail.com; all other recipients are users. No wallet-role classifications are used.')

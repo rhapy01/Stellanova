@@ -92,7 +92,7 @@ export function MediaAdmin({
     try {
       const metadata = {
         name: metaName,
-        description: metaDesc || `${metaName} — an StellaNova Edition.`,
+        description: metaDesc || `${metaName} — an NovaMarket Edition.`,
         image: metaImage,
         attributes: [] as { trait_type: string; value: string }[],
       }
@@ -117,7 +117,7 @@ export function MediaAdmin({
               <span className="eyebrow">MEDIA STACK · ADMIN</span>
               <h1>Media<br /><i>management.</i></h1>
             </div>
-            <button className="round-action" onClick={() => window.location.assign('/')} aria-label="Back to StellaNova">
+            <button className="round-action" onClick={() => window.location.assign('/')} aria-label="Back to NovaMarket">
               <Icon name="arrow" size={20} />
             </button>
           </section>
@@ -451,7 +451,7 @@ export function MediaAdmin({
                   description: metaDesc || '<Description>',
                   image: metaImage || '<Media URL from upload step>',
                   attributes: [],
-                  compiler: 'StellaNova Media Admin',
+                  compiler: 'NovaMarket Media Admin',
                 },
                 null,
                 2,

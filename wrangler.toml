@@ -1,0 +1,6 @@
+name = "novamarket"
+compatibility_date = "2026-10-31"
+pages_build_output_dir = "./dist"
+
+[vars]
+VERCEL_API_ORIGIN = "https://novamarket-xi.vercel.app"

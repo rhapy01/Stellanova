@@ -1,6 +1,6 @@
 # R2 production media domain — runbook
 
-StellaNova stores canonical NFT media and token metadata as immutable objects in Cloudflare R2
+NovaMarket stores canonical NFT media and token metadata as immutable objects in Cloudflare R2
 and serves them through a public delivery URL. The current configured base URL is an `r2.dev`
 URL:
 
@@ -49,7 +49,7 @@ point `CLOUDFLARE_R2_PUBLIC_BASE_URL` at it.
      `https://media.nftgram.io/nftgram/originals/<key>`.
    - Confirm TLS is valid and the edge serves it.
 
-4. **Point StellaNova at the custom domain**
+4. **Point NovaMarket at the custom domain**
    - Set both the server and client env vars to the custom base URL (no trailing slash):
      ```
      CLOUDFLARE_R2_PUBLIC_BASE_URL=https://media.nftgram.io

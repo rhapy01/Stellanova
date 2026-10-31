@@ -20,6 +20,7 @@ const root = path.resolve(__dirname, '..')
 const port = Number(process.env.PORT ?? 3000)
 const isProduction = process.env.NODE_ENV === 'production'
 const isVercel = Boolean(process.env.VERCEL)
+const bootstrapAdminEmails = [...new Set((process.env.STELLANOVA_ADMIN_EMAILS ?? 'stelarnova14@gmail.com,akintoyeisaac5@gmail.com').split(',').map((email) => email.trim().toLowerCase()).filter(Boolean))]
 
 const r2Enabled = Boolean(process.env.CLOUDFLARE_R2_ENDPOINT && process.env.CLOUDFLARE_R2_ACCESS_KEY_ID && process.env.CLOUDFLARE_R2_SECRET_ACCESS_KEY && process.env.CLOUDFLARE_R2_BUCKET && process.env.CLOUDFLARE_R2_PUBLIC_BASE_URL)
 const cloudinaryEnabled = Boolean(process.env.CLOUDINARY_CLOUD_NAME && process.env.CLOUDINARY_API_KEY && process.env.CLOUDINARY_API_SECRET)
@@ -222,7 +223,7 @@ function extractAiJsonObject<T>(value: string): T | null {
   return null
 }
 
-const publicSiteOrigin = (process.env.PUBLIC_SITE_URL || 'https://stelanova.vercel.app').replace(/\/$/, '')
+const publicSiteOrigin = (process.env.PUBLIC_SITE_URL || 'https://novamarket-a2p.pages.dev').replace(/\/$/, '')
 
 app.get(['/api/robots.txt', '/robots.txt'], (_req, res) => {
   res.type('text/plain').send([
@@ -269,8 +270,8 @@ app.get(['/api/sitemap.xml', '/sitemap.xml'], async (_req, res) => {
 app.get(['/api/share/page/:page', '/explore', '/collections'], async (req, res) => {
   const page = String(req.params.page ?? req.path.slice(1))
   const pages: Record<string, { title: string; description: string; url: string }> = {
-    explore: { title: 'Explore digital art · StellaNova', description: 'Browse digital artwork and NFTs shared by creators on StellaNova.', url: `${publicSiteOrigin}/explore` },
-    collections: { title: 'NFT collections · StellaNova', description: 'Discover creator collections and live drops on StellaNova.', url: `${publicSiteOrigin}/collections` },
+    explore: { title: 'Explore digital art · NovaMarket', description: 'Browse digital artwork and NFTs shared by creators on NovaMarket.', url: `${publicSiteOrigin}/explore` },
+    collections: { title: 'NFT collections · NovaMarket', description: 'Discover creator collections and live drops on NovaMarket.', url: `${publicSiteOrigin}/collections` },
   }
   const metadata = pages[page]
   if (!metadata) return res.status(404).type('text/plain').send('Page not found')
@@ -294,9 +295,9 @@ app.get(['/api/share/creator/:id', '/creator/:id'], async (req, res) => {
     const profile = profiles[0]
     if (!profile) return res.status(404).type('text/plain').send('Creator not found')
     const name = profile.creator_username ? `@${profile.creator_username}` : profile.display_name.trim() || 'Stellar creator'
-    const description = profile.bio.trim() || `Explore artwork and collections from ${name} on StellaNova.`
+    const description = profile.bio.trim() || `Explore artwork and collections from ${name} on NovaMarket.`
     const publicId = profile.creator_username || profile.wallet_address
-    return await sendSocialPage(res, { title: `${name} · StellaNova`, description, url: `${publicSiteOrigin}/creator/${encodeURIComponent(publicId)}` })
+    return await sendSocialPage(res, { title: `${name} · NovaMarket`, description, url: `${publicSiteOrigin}/creator/${encodeURIComponent(publicId)}` })
   } catch (error) {
     console.error('Creator page render failed', error)
     return res.status(503).type('text/plain').send('Creator information is temporarily unavailable')
@@ -311,7 +312,7 @@ async function sendSocialPage(res: express.Response, metadata: { title: string; 
   try { imageUrl = new URL(metadata.image || '/icon-512.png', metadata.url).toString() } catch { /* use the relative fallback */ }
   const meta = [
     ['name', 'description', metadata.description],
-    ['property', 'og:site_name', 'StellaNova'],
+    ['property', 'og:site_name', 'NovaMarket'],
     ['property', 'og:type', metadata.type ?? 'website'],
     ['property', 'og:title', metadata.title],
     ['property', 'og:description', metadata.description],
@@ -335,7 +336,7 @@ async function sendSocialPage(res: express.Response, metadata: { title: string; 
   html = /<link\s+rel="canonical"[^>]*>/i.test(html)
     ? html.replace(/<link\s+rel="canonical"[^>]*>/i, canonical)
     : html.replace('</head>', `    ${canonical}\n  </head>`)
-  const pageSummary = `<main class="crawler-page-summary"><h1>${title}</h1><p>${description}</p><a href="${escapeHtml(metadata.url)}">Open this page in StellaNova</a></main>`
+  const pageSummary = `<main class="crawler-page-summary"><h1>${title}</h1><p>${description}</p><a href="${escapeHtml(metadata.url)}">Open this page in NovaMarket</a></main>`
   const noScriptSummary = `<noscript>${pageSummary}</noscript>`
   html = html.replace(/<noscript>[\s\S]*?<\/noscript>/i, noScriptSummary)
   html = html.replace(/<div id="root">[\s\S]*?<\/div>/i, `<div id="root"></div>`)
@@ -348,14 +349,16 @@ app.get(['/api/share/collection/:slug', '/collection/:slug'], async (req, res) =
     if (!databaseAvailable()) return res.status(503).type('text/plain').send('Collection information is temporarily unavailable')
     await ensureSchema()
     const rows = await query<{ name: string; description: string; cover: string | null }[]>(
-      'SELECT name, description, cover FROM collections WHERE slug = ? LIMIT 1', [slugValue],
+      `SELECT c.name, c.description,
+              CASE WHEN c.revealed THEN COALESCE((SELECT NULLIF(n.image, '') FROM nft_mints n WHERE n.collection_id = c.slug ORDER BY n.created_at ASC NULLS LAST, n.token_id ASC LIMIT 1), c.cover) ELSE c.cover END AS cover
+       FROM collections c WHERE c.slug = ? LIMIT 1`, [slugValue],
     )
     const collection = rows[0]
     if (!collection) return res.status(404).type('text/plain').send('Collection not found')
     const baseUrl = publicSiteOrigin
     return await sendSocialPage(res, {
-      title: `${collection.name} · StellaNova`,
-      description: collection.description || `Explore ${collection.name} on StellaNova.`,
+      title: `${collection.name} · NovaMarket`,
+      description: collection.description || `Explore ${collection.name} on NovaMarket.`,
       image: collection.cover,
       url: `${baseUrl}/collection/${encodeURIComponent(slugValue)}`,
     })
@@ -388,10 +391,10 @@ app.get(['/api/share/nft/:id', '/nft/:id'], async (req, res) => {
     const nft = rows[0]
     if (!nft) return res.status(404).type('text/plain').send('NFT not found')
     const unrevealed = nft.collection_revealed === false
-    const title = unrevealed ? `${nft.collection_name || 'Collection'} · StellaNova` : `${nft.title} · StellaNova`
+    const title = unrevealed ? `${nft.collection_name || 'Collection'} · NovaMarket` : `${nft.title} · NovaMarket`
     const description = unrevealed
       ? `${nft.collection_name || 'This collection'} has not revealed its artwork yet.`
-      : nft.description?.trim() || `View ${nft.title} on StellaNova.`
+      : nft.description?.trim() || `View ${nft.title} on NovaMarket.`
     return await sendSocialPage(res, { title, description, image: unrevealed ? null : nft.image, url, type: 'article' })
   } catch (error) {
     console.error('NFT social preview failed', error)
@@ -435,8 +438,8 @@ app.get(['/api/share/post/:id', '/post/:id'], async (req, res) => {
       linkedNftImage = linkedNft?.image || (linkedNft?.collection_revealed === false ? linkedNft.collection_cover : null) || null
     }
     return await sendSocialPage(res, {
-      title: `${author} shared a post · StellaNova`,
-      description: post.caption?.trim() || `View ${author}'s post on StellaNova.`,
+      title: `${author} shared a post · NovaMarket`,
+      description: post.caption?.trim() || `View ${author}'s post on NovaMarket.`,
       image: post.media_url || linkedNftImage || post.avatar,
       url,
       type: 'article',
@@ -530,7 +533,7 @@ app.post('/api/auth/privy/session', processRateLimit('privy-session', 20, 10 * 6
     const user = await privyClient.users()._get(claims.user_id)
     const account = user.linked_accounts.find((linked) => linked.type === 'wallet' && linked.chain_type === 'stellar' && linked.wallet_client_type === 'privy')
     if (!account || account.type !== 'wallet' || !stellarAddress.test(account.address)) {
-      return res.status(403).json({ error: 'This email account does not have an StellaNova Stellar wallet' })
+      return res.status(403).json({ error: 'This email account does not have an NovaMarket Stellar wallet' })
     }
     const emailAccount = user.linked_accounts.find((linked) => linked.type === 'email')
     const accountEmail = emailAccount && 'address' in emailAccount && typeof emailAccount.address === 'string' ? emailAccount.address.trim().toLowerCase() : ''
@@ -538,6 +541,9 @@ app.post('/api/auth/privy/session', processRateLimit('privy-session', 20, 10 * 6
     const freshAccount = await query<{ wallet_address: string }[]>('INSERT INTO wallet_accounts (wallet_address) VALUES (?) ON CONFLICT (wallet_address) DO NOTHING RETURNING wallet_address', [account.address])
     const firstAccountUse = freshAccount.length > 0 && !(await hasWalletHistory(account.address))
     await query('INSERT INTO user_profiles (wallet_address, email) VALUES (?, ?) ON CONFLICT (wallet_address) DO UPDATE SET email = COALESCE(EXCLUDED.email, user_profiles.email), updated_at = now()', [account.address, accountEmail || null])
+    if (accountEmail && bootstrapAdminEmails.includes(accountEmail)) {
+      await query('UPDATE user_profiles SET is_admin=TRUE, updated_at=now() WHERE LOWER(wallet_address)=LOWER(?)', [account.address])
+    }
     const referralApplied = firstAccountUse ? await attributeNewWalletReferral(account.address, req.body?.referralCode) : false
     if (String(process.env.VITE_STELLAR_NETWORK ?? 'TESTNET').toUpperCase() === 'TESTNET') {
       try {
@@ -595,7 +601,7 @@ app.post('/api/auth/challenge', processRateLimit('wallet-challenge', 20, 10 * 60
   if (!stellarAddress.test(wallet)) return res.status(400).json({ error: 'A valid Stellar wallet address is required' })
   const id = crypto.randomUUID()
   const expiresAt = new Date(Date.now() + 5 * 60_000)
-  const message = `StellaNova sign-in\nWallet: ${wallet}\nChallenge: ${id}\nExpires: ${expiresAt.toISOString()}`
+  const message = `NovaMarket sign-in\nWallet: ${wallet}\nChallenge: ${id}\nExpires: ${expiresAt.toISOString()}`
   try {
     await ensureSchema()
     await query('DELETE FROM wallet_auth_challenges WHERE expires_at <= now()')
@@ -1021,7 +1027,7 @@ async function notifyOfferWallet(wallet: string, kind: string, title: string, bo
   const profile = await query<{ email: string | null }[]>('SELECT email FROM user_profiles WHERE LOWER(wallet_address) = LOWER(?) LIMIT 1', [wallet])
   const email = profile[0]?.email?.trim()
   if (email) {
-    const content = marketplaceEmail(emailSubject, body, actionUrl ?? 'https://stellanova-fawn.vercel.app/account', actionUrl ? 'View NFT on StellaNova' : 'Review marketplace activity')
+    const content = marketplaceEmail(emailSubject, body, actionUrl ?? 'https://novamarket-a2p.pages.dev/account', actionUrl ? 'View NFT on NovaMarket' : 'Review marketplace activity')
     await sendMail({ to: email, subject: emailSubject, ...content })
   }
 }
@@ -1037,11 +1043,17 @@ async function marketplaceNftEmailContext(contractId: string, tokenId: number) {
      LEFT JOIN collections c ON c.slug = COALESCE(m.collection_id, n.collection_id)`,
     [contractId, tokenId],
   )
-  const appUrl = (process.env.PUBLIC_APP_URL ?? process.env.APP_URL ?? 'https://stellanova-fawn.vercel.app').replace(/\/$/, '')
+  const appUrl = (process.env.PUBLIC_APP_URL ?? process.env.APP_URL ?? 'https://novamarket-a2p.pages.dev').replace(/\/$/, '')
   return {
     title: rows[0]?.title?.trim() || `NFT #${tokenId}`,
     url: new URL(`/nft/${encodeURIComponent(`minted-${contractId.toLowerCase()}-${tokenId}`)}`, appUrl).toString(),
   }
+}
+
+async function syncBootstrapAdminAccounts() {
+  if (!bootstrapAdminEmails.length) return
+  const placeholders = bootstrapAdminEmails.map(() => '?').join(', ')
+  await query(`UPDATE user_profiles SET is_admin=TRUE, updated_at=now() WHERE LOWER(email) IN (${placeholders}) AND is_admin=FALSE`, bootstrapAdminEmails)
 }
 
 async function requireAdmin(req: express.Request, res: express.Response, next: express.NextFunction) {
@@ -1050,6 +1062,8 @@ async function requireAdmin(req: express.Request, res: express.Response, next: e
   if (!databaseAvailable()) return res.status(503).json({ error: 'Persistent database is not configured' })
   if (!wallet) return res.status(401).json({ error: 'Sign in with your Stellar wallet first' })
   try {
+    await ensureSchema()
+    await syncBootstrapAdminAccounts()
     const rows = await query<{ is_admin: boolean }[]>('SELECT is_admin FROM user_profiles WHERE wallet_address = ?', [wallet])
     if (!rows.length || !rows[0].is_admin) return res.status(403).json({ error: 'Administrator authorization required' })
     res.locals.wallet = wallet
@@ -1100,7 +1114,7 @@ async function deliverOpsAlert(status: 'degraded' | 'recovered', summary: string
       : previous?.status === 'degraded'
   }
   if (!shouldSend) return { sent: false, reason: 'suppressed_by_policy' }
-  const text = `StellaNova operations: ${status}\n${summary}\nChecked: ${new Date().toISOString()}`
+  const text = `NovaMarket operations: ${status}\n${summary}\nChecked: ${new Date().toISOString()}`
   const webhook = process.env.OPS_ALERT_WEBHOOK_URL
   let webhookSent = false
   if (webhook && /^https:\/\//i.test(webhook)) {
@@ -1112,9 +1126,9 @@ async function deliverOpsAlert(status: 'degraded' | 'recovered', summary: string
   const recipient = process.env.OPS_ALERT_EMAIL ?? 'akintoyeisaac5@gmail.com'
   const email = mailConfigured() ? await sendMail({
     to: recipient,
-    subject: `StellaNova operations ${status}`,
+    subject: `NovaMarket operations ${status}`,
     text,
-    html: `<!doctype html><html><body style="font:15px Arial,sans-serif;background:#f5f3f8;padding:24px;color:#211d29"><main style="max-width:560px;margin:auto;background:white;border:1px solid #e9e5ef;border-radius:14px;padding:24px"><div style="font-size:12px;letter-spacing:1.2px;color:#7253dc;font-weight:700">STELLANOVA · OPERATIONS</div><h1 style="font-size:22px">System ${status}</h1><p>${summary.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!)}</p><small>Checked ${new Date().toISOString()}</small></main></body></html>`,
+    html: `<!doctype html><html><body style="font:15px Arial,sans-serif;background:#f5f3f8;padding:24px;color:#211d29"><main style="max-width:560px;margin:auto;background:white;border:1px solid #e9e5ef;border-radius:14px;padding:24px"><div style="font-size:12px;letter-spacing:1.2px;color:#7253dc;font-weight:700">NOVAMARKET · OPERATIONS</div><h1 style="font-size:22px">System ${status}</h1><p>${summary.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!)}</p><small>Checked ${new Date().toISOString()}</small></main></body></html>`,
   }) : { sent: false }
   const sent = webhookSent || email.sent
   opsAlertFallbackState.set(alertKey, { status, sentAt: Date.now() })
@@ -1433,7 +1447,7 @@ app.post('/api/push/test', processRateLimit('browser-push-test', 5, 10 * 60_000)
   try {
     await ensureSchema()
     const result = await sendBrowserPush(wallet, {
-      title: 'StellaNova test alert',
+      title: 'NovaMarket test alert',
       body: 'Browser alerts are reaching this device.',
       url: '/account',
     })
@@ -1853,7 +1867,7 @@ app.get('/api/nfts/:contract/:tokenId/provenance', async (req, res) => {
 // indexer/read-model records; keep projections separate to avoid join inflation.
 app.post('/api/analytics/social-event', async (req, res) => {
   res.setHeader('Cache-Control', 'no-store')
-  res.status(410).json({ error: 'Client-submitted social analytics are disabled. Product engagement must be derived from verified StellaNova records.' })
+  res.status(410).json({ error: 'Client-submitted social analytics are disabled. Product engagement must be derived from verified NovaMarket records.' })
 })
 
 app.get('/api/analytics/overview', async (_req, res) => {
@@ -1922,12 +1936,14 @@ app.get('/api/analytics/overview', async (_req, res) => {
          LEFT JOIN sale_days USING (day) LEFT JOIN mint_days_volume USING (day) ORDER BY days.day`,
       ),
       query<{ collection_id: string; name: string; cover: string; minted: number }[]>(
-        `SELECT c.slug AS collection_id, c.name, c.cover, COUNT(v.token_id)::int AS minted
+        `SELECT c.slug AS collection_id, c.name,
+                CASE WHEN c.revealed THEN COALESCE((SELECT NULLIF(n.image, '') FROM nft_mints n WHERE n.collection_id = c.slug ORDER BY n.created_at ASC NULLS LAST, n.token_id ASC LIMIT 1), c.cover) ELSE c.cover END AS cover,
+                COUNT(v.token_id)::int AS minted
          FROM collections c
          LEFT JOIN nft_mints m ON m.collection_id = c.slug
          LEFT JOIN verified_nft_mints v ON LOWER(v.contract_id) = LOWER(m.contract_id) AND v.token_id = m.token_id
          WHERE c.contract_id IS NOT NULL
-         GROUP BY c.slug, c.name, c.cover ORDER BY minted DESC, c.name ASC LIMIT 5`,
+         GROUP BY c.slug, c.name, c.cover, c.revealed ORDER BY minted DESC, c.name ASC LIMIT 5`,
       ),
     ])
     res.json({ generatedAt: new Date().toISOString(), network: 'Stellar Testnet', summary: summary[0] ?? { collections: 0, minted: 0, holders: 0, listings: 0, sales: 0, primary_volume_xlm: '0', secondary_volume_xlm: '0', volume_xlm: '0' }, daily, topCollections })
@@ -2260,7 +2276,9 @@ app.get('/api/collection-stories', requireWallet, async (_req, res) => {
       creatorGroups.push(...groups.values())
     }
     const collectionRows = await query<{ collection_id: string; name: string; cover: string; owner_wallet: string; id: number | null; media_url: string | null; media_type: string | null; caption: string | null; created_at: string | null; expires_at: string | null; viewed: boolean | null }[]>(
-      `SELECT c.slug AS collection_id, c.name, c.cover, c.owner_wallet,
+      `SELECT c.slug AS collection_id, c.name,
+              CASE WHEN c.revealed THEN COALESCE((SELECT NULLIF(n.image, '') FROM nft_mints n WHERE n.collection_id = c.slug ORDER BY n.created_at ASC NULLS LAST, n.token_id ASC LIMIT 1), c.cover) ELSE c.cover END AS cover,
+              c.owner_wallet,
               s.id, s.media_url, s.media_type, s.caption, s.created_at, s.expires_at,
               EXISTS (SELECT 1 FROM story_views v WHERE v.story_kind = 'collection' AND v.story_id = s.id AND LOWER(v.viewer_wallet) = LOWER(?)) AS viewed
        FROM collections c
@@ -2365,11 +2383,13 @@ app.get('/api/posts', async (req, res) => {
     const postId = /^\d+$/.test(postIdRaw) && Number.isSafeInteger(Number(postIdRaw)) ? Number(postIdRaw) : null
     const rows = await query<{ id: number; author: string; author_name: string; creator_username: string | null; profile_display_name: string | null; avatar: string; media_url: string; media_type: string; caption: string; linked_nft_id: string | null; post_kind: string; author_type: 'user' | 'collection'; collection_id: string | null; price_xlm: string | null; created_at: string; tips_count: number; tips_total_xlm: string }[]>(
       `SELECT posts.id, posts.author, posts.author_name, p.creator_username, p.display_name AS profile_display_name,
-              CASE WHEN posts.author_type = 'user' THEN COALESCE(NULLIF(p.avatar, ''), posts.avatar) ELSE posts.avatar END AS avatar,
+              CASE WHEN posts.author_type = 'user' THEN COALESCE(NULLIF(p.avatar, ''), posts.avatar)
+                   ELSE COALESCE(NULLIF(CASE WHEN c.revealed THEN (SELECT NULLIF(n.image, '') FROM nft_mints n WHERE n.collection_id = c.slug ORDER BY n.created_at ASC NULLS LAST, n.token_id ASC LIMIT 1) ELSE c.cover END, ''), posts.avatar) END AS avatar,
               posts.media_url, posts.media_type, posts.caption, posts.linked_nft_id, posts.post_kind, posts.author_type, posts.collection_id, posts.price_xlm, posts.created_at,
               (SELECT COUNT(*)::int FROM post_tips pt WHERE pt.post_id = posts.id) AS tips_count,
               COALESCE((SELECT SUM(pt.amount_xlm)::text FROM post_tips pt WHERE pt.post_id = posts.id), '0') AS tips_total_xlm
        FROM posts LEFT JOIN user_profiles p ON p.wallet_address = posts.author
+       LEFT JOIN collections c ON c.slug = posts.collection_id
        WHERE COALESCE((to_jsonb(posts)->>'is_demo')::boolean, FALSE) = FALSE
          AND (? = '' OR posts.collection_id = ?)
          AND (? = '' OR lower(posts.author) = lower(?))
@@ -2451,7 +2471,9 @@ app.post('/api/posts', requireWallet, async (req, res) => {
     [wallet],
   )
   const collection = collectionId ? await query<{ slug: string; name: string; cover: string; owner_wallet: string }[]>(
-    'SELECT slug, name, cover, owner_wallet FROM collections WHERE slug = ?', [collectionId],
+    `SELECT c.slug, c.name,
+            CASE WHEN c.revealed THEN COALESCE((SELECT NULLIF(n.image, '') FROM nft_mints n WHERE n.collection_id = c.slug ORDER BY n.created_at ASC NULLS LAST, n.token_id ASC LIMIT 1), c.cover) ELSE c.cover END AS cover,
+            c.owner_wallet FROM collections c WHERE c.slug = ?`, [collectionId],
   ) : []
   if (collectionId && !collection.length) return res.status(404).json({ error: 'Collection not found' })
   if (collectionId && collection[0].owner_wallet !== wallet) return res.status(403).json({ error: 'Only the collection owner can post as this collection' })
@@ -2512,7 +2534,7 @@ app.post('/api/posts/:id/tips', requireWallet, async (req, res) => {
         return res.status(409).json({ error: 'This Stellar transaction was already recorded for another tip' })
       }
     } else {
-      await query('INSERT INTO notifications (wallet_address, kind, title, body) VALUES (?, ?, ?, ?)', [target.author, 'post_tip', 'You received a tip', `${amount} XLM was sent for your art post. https://stellanova-fawn.vercel.app/post/${postId}`])
+      await query('INSERT INTO notifications (wallet_address, kind, title, body) VALUES (?, ?, ?, ?)', [target.author, 'post_tip', 'You received a tip', `${amount} XLM was sent for your art post. https://novamarket-a2p.pages.dev/post/${postId}`])
     }
     const totals = await query<{ tips_count: number; tips_total_xlm: string }[]>(
       'SELECT COUNT(*)::int AS tips_count, COALESCE(SUM(amount_xlm)::text, \'0\') AS tips_total_xlm FROM post_tips WHERE post_id = ?', [postId],
@@ -2669,7 +2691,7 @@ app.post('/api/nft/contracts/register', requireWallet, async (req, res) => {
   const wallet = res.locals.wallet as string
   const contractId = String(req.body?.contractId ?? '').trim()
   const network = String(process.env.VITE_STELLAR_NETWORK ?? 'TESTNET').toUpperCase()
-  if (network !== 'TESTNET') return res.status(409).json({ error: 'StellaNova creator contracts can only be registered on Stellar Testnet' })
+  if (network !== 'TESTNET') return res.status(409).json({ error: 'NovaMarket creator contracts can only be registered on Stellar Testnet' })
   if (!/^C[A-Z2-7]{55}$/.test(contractId)) return res.status(400).json({ error: 'A valid Soroban contract ID is required' })
   try {
     await ensureSchema()
@@ -2684,12 +2706,16 @@ app.get('/api/account', requireWallet, async (req, res) => {
   const wallet = res.locals.wallet as string
   try {
     await ensureSchema()
+    await syncBootstrapAdminAccounts()
     const rows = await query<{ display_name: string; creator_username: string | null; avatar: string; bio: string; is_creator: boolean; is_admin: boolean; is_verified: boolean }[]>(
       'SELECT display_name, creator_username, avatar, bio, is_creator, is_admin, is_verified FROM user_profiles WHERE wallet_address = ?',
       [wallet],
     )
     const collections = await query<{ id: number; slug: string; name: string; symbol: string; description: string; cover: string; contract_id: string | null; total_supply: number | null; website_url: string | null; social_links: Record<string, string> }[]>(
-      'SELECT id, slug, name, symbol, description, cover, contract_id, total_supply, website_url, social_links FROM collections WHERE owner_wallet = ? ORDER BY created_at ASC',
+      `SELECT c.id, c.slug, c.name, c.symbol, c.description,
+              CASE WHEN c.revealed THEN COALESCE((SELECT NULLIF(n.image, '') FROM nft_mints n WHERE n.collection_id = c.slug ORDER BY n.created_at ASC NULLS LAST, n.token_id ASC LIMIT 1), c.cover) ELSE c.cover END AS cover,
+              c.contract_id, c.total_supply, c.website_url, c.social_links
+       FROM collections c WHERE c.owner_wallet = ? ORDER BY c.created_at ASC`,
       [wallet],
     )
     if (!rows.length) return res.json({ account: null, isCreator: false, isAdmin: false, collections })
@@ -2697,6 +2723,132 @@ app.get('/api/account', requireWallet, async (req, res) => {
     res.json({ account: { ...profile, wallet_address: wallet }, isCreator: profile.is_creator, isAdmin: profile.is_admin, collections })
   } catch (error) {
     res.status(503).json({ error: error instanceof Error ? error.message : 'Account query failed' })
+  }
+})
+
+// A wallet's trading history is derived from confirmed marketplace and mint
+// events. Profit is only calculated where an indexed acquisition cost exists.
+app.get('/api/account/trading-activity', requireWallet, async (_req, res) => {
+  const wallet = String(res.locals.wallet ?? '')
+  if (!databaseAvailable()) return res.status(503).json({ error: 'Trading history is temporarily unavailable' })
+  try {
+    await ensureSchema()
+    const [marketRows, mintRows, transferRows] = await Promise.all([
+      query<{ event_type: string; contract_id: string; tx_hash: string; ledger: number; created_at: string; buyer: string; seller: string; nft_contract: string; token_id: number; amount: string; payment_token: string | null; title: string | null }[]>(
+        `SELECT e.event_type, e.contract_id, e.tx_hash, e.ledger, e.created_at,
+                e.payload->'value'->>1 AS buyer, e.payload->'value'->>2 AS seller,
+                e.payload->'value'->>3 AS nft_contract,
+                NULLIF(e.payload->'value'->>4, '')::int AS token_id,
+                e.payload->'value'->>5 AS amount,
+                CASE e.event_type
+                  WHEN 'sale' THEN (SELECT l.payment_token FROM marketplace_listings l WHERE l.contract_id=e.contract_id AND l.listing_id=NULLIF(e.payload->'value'->>0, '')::int LIMIT 1)
+                  WHEN 'offer_s' THEN (SELECT o.payment_token FROM marketplace_offers o WHERE o.contract_id=e.contract_id AND o.offer_id=NULLIF(e.payload->'value'->>0, '')::int LIMIT 1)
+                  WHEN 'c_sale' THEN (SELECT o.payment_token FROM marketplace_collection_offers o WHERE o.contract_id=e.contract_id AND o.offer_id=NULLIF(e.payload->'value'->>0, '')::int LIMIT 1)
+                  WHEN 't_sale' THEN (SELECT o.payment_token FROM marketplace_trait_offers o WHERE o.contract_id=e.contract_id AND o.offer_id=NULLIF(e.payload->'value'->>0, '')::int LIMIT 1)
+                  WHEN 'auc_s' THEN (SELECT a.payment_token FROM marketplace_auctions a WHERE a.contract_id=e.contract_id AND a.auction_id=NULLIF(e.payload->'value'->>0, '')::int LIMIT 1)
+                  ELSE NULL
+                END AS payment_token,
+                m.title
+         FROM marketplace_events e
+         LEFT JOIN nft_mints m ON LOWER(m.contract_id)=LOWER(e.payload->'value'->>3)
+                              AND m.token_id=NULLIF(e.payload->'value'->>4, '')::int
+         WHERE e.event_type IN ('sale', 'offer_s', 'c_sale', 't_sale', 'auc_s')
+           AND (LOWER(COALESCE(e.payload->'value'->>1, ''))=LOWER(?)
+             OR LOWER(COALESCE(e.payload->'value'->>2, ''))=LOWER(?))
+         ORDER BY e.ledger ASC, e.created_at ASC`, [wallet, wallet],
+      ),
+      query<{ contract_id: string; token_id: number; tx_hash: string; ledger: number; created_at: string; paid_stroops: string | null; mint_quantity: number | null; title: string | null }[]>(
+        `SELECT v.contract_id, v.token_id, v.tx_hash, v.ledger, v.created_at,
+                s.paid_stroops::text AS paid_stroops, cardinality(s.token_ids)::int AS mint_quantity,
+                m.title
+         FROM verified_nft_mints v
+         LEFT JOIN stage_mint_events s ON LOWER(s.contract_id)=LOWER(v.contract_id)
+           AND s.tx_hash=v.tx_hash AND LOWER(s.wallet)=LOWER(v.minter) AND v.token_id=ANY(s.token_ids)
+         LEFT JOIN nft_mints m ON LOWER(m.contract_id)=LOWER(v.contract_id) AND m.token_id=v.token_id
+         WHERE LOWER(v.minter)=LOWER(?)
+         ORDER BY v.ledger ASC`, [wallet],
+      ),
+      query<{ contract_id: string; tx_hash: string; ledger: number; created_at: string; from_wallet: string; to_wallet: string; token_id: number }[]>(
+        `SELECT e.contract_id, e.tx_hash, e.ledger, e.created_at,
+                e.payload->'topics'->>1 AS from_wallet, e.payload->'topics'->>2 AS to_wallet,
+                NULLIF(e.payload->'value'->>0, '')::int AS token_id
+         FROM marketplace_events e
+         WHERE e.event_type='transfer'
+           AND (LOWER(COALESCE(e.payload->'topics'->>1, ''))=LOWER(?)
+             OR LOWER(COALESCE(e.payload->'topics'->>2, ''))=LOWER(?))
+         ORDER BY e.ledger ASC, e.created_at ASC`, [wallet, wallet],
+      ),
+    ])
+
+    type Activity = { kind: 'mint' | 'purchase' | 'sale'; contractId: string; tokenId: number; txHash: string; ledger: number; occurredAt: string; amountStroops: string | null; paymentToken: string | null; title: string }
+    const activity: Activity[] = mintRows.map((row) => {
+      const quantity = Math.max(1, Number(row.mint_quantity ?? 1))
+      const total = row.paid_stroops && /^\d+$/.test(row.paid_stroops) ? BigInt(row.paid_stroops) : null
+      return { kind: 'mint', contractId: row.contract_id, tokenId: Number(row.token_id), txHash: row.tx_hash, ledger: Number(row.ledger), occurredAt: row.created_at, amountStroops: total === null ? null : (total / BigInt(quantity)).toString(), paymentToken: total === null ? null : (process.env.STELLAR_PAYMENT_TOKEN ?? process.env.VITE_STELLAR_PAYMENT_TOKEN ?? 'CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC'), title: row.title || `Token #${row.token_id}` }
+    })
+    for (const row of marketRows) {
+      const buyer = String(row.buyer ?? '')
+      const seller = String(row.seller ?? '')
+      const kind = buyer.toLowerCase() === wallet.toLowerCase() ? 'purchase' : seller.toLowerCase() === wallet.toLowerCase() ? 'sale' : null
+      if (!kind || !row.nft_contract || row.token_id === null || !/^\d+$/.test(String(row.amount ?? ''))) continue
+      activity.push({ kind, contractId: row.nft_contract, tokenId: Number(row.token_id), txHash: row.tx_hash, ledger: Number(row.ledger), occurredAt: row.created_at, amountStroops: String(row.amount), paymentToken: row.payment_token, title: row.title || `Token #${row.token_id}` })
+    }
+    const compareOccurredAt = (left: unknown, right: unknown) => {
+      const leftTime = new Date(left as string | number | Date).getTime()
+      const rightTime = new Date(right as string | number | Date).getTime()
+      if (Number.isFinite(leftTime) && Number.isFinite(rightTime)) return leftTime - rightTime
+      return String(left ?? '').localeCompare(String(right ?? ''))
+    }
+    activity.sort((a, b) => a.ledger - b.ledger || compareOccurredAt(a.occurredAt, b.occurredAt) || String(a.txHash ?? '').localeCompare(String(b.txHash ?? '')))
+
+    let minted = 0, purchased = 0, sold = 0, unknownCostBasisSales = 0
+    let mintSpend = 0n, purchaseSpend = 0n, saleProceeds = 0n, realizedGrossGain = 0n
+    const costs = new Map<string, bigint>()
+    const marketplaceTxs = new Set(marketRows.map((row) => row.tx_hash))
+    const mintTxs = new Set(mintRows.map((row) => row.tx_hash))
+    const timeline = [
+      ...activity.map((row) => ({ ...row, timelineKind: row.kind as string })),
+      ...transferRows.filter((row) => !marketplaceTxs.has(row.tx_hash) && !mintTxs.has(row.tx_hash) && row.token_id !== null).map((row) => ({
+        contractId: row.contract_id, tokenId: Number(row.token_id), txHash: row.tx_hash, ledger: Number(row.ledger), occurredAt: row.created_at,
+        amountStroops: null, paymentToken: null, title: '', kind: 'transfer' as const,
+        timelineKind: String(row.to_wallet).toLowerCase() === wallet.toLowerCase() ? 'transfer-in' : 'transfer-out',
+      })),
+    ].sort((a, b) => a.ledger - b.ledger || compareOccurredAt(a.occurredAt, b.occurredAt) || String(a.txHash ?? '').localeCompare(String(b.txHash ?? '')))
+    for (const row of timeline) {
+      const key = `${row.contractId.toLowerCase()}:${row.tokenId}`
+      if (row.timelineKind === 'transfer-in' || row.timelineKind === 'transfer-out') { costs.delete(key); continue }
+      const amount = row.amountStroops && row.paymentToken ? BigInt(row.amountStroops) : null
+      if (row.kind === 'mint') {
+        minted++
+        if (amount !== null) { mintSpend += amount; costs.set(key, amount) }
+      } else if (row.kind === 'purchase') {
+        purchased++
+        if (amount !== null) { purchaseSpend += amount; costs.set(key, amount) }
+      } else {
+        sold++
+        if (amount !== null) saleProceeds += amount
+        const cost = costs.get(key)
+        if (amount !== null && cost !== undefined) realizedGrossGain += amount - cost
+        else unknownCostBasisSales++
+        costs.delete(key)
+      }
+    }
+    const formatXlm = (value: bigint) => {
+      const negative = value < 0n
+      const absolute = negative ? -value : value
+      const whole = absolute / 10_000_000n
+      const fraction = (absolute % 10_000_000n).toString().padStart(7, '0').replace(/0+$/, '')
+      return `${negative ? '-' : ''}${whole}${fraction ? `.${fraction}` : ''}`
+    }
+    res.json({
+      generatedAt: new Date().toISOString(),
+      network: 'Stellar Testnet',
+      summary: { minted, purchased, sold, mintSpendXlm: formatXlm(mintSpend), purchaseSpendXlm: formatXlm(purchaseSpend), saleProceedsXlm: formatXlm(saleProceeds), netCashFlowXlm: formatXlm(saleProceeds - purchaseSpend - mintSpend), realizedGrossGainXlm: formatXlm(realizedGrossGain), knownCostBasisSales: sold - unknownCostBasisSales, unknownCostBasisSales },
+      activity: activity.slice().reverse().slice(0, 100),
+      coverage: { indexedEvents: activity.length, note: 'Confirmed NovaMarket indexed events only. Gain uses known mint or NovaMarket purchase costs and is before marketplace fees and royalties. NFTs acquired outside NovaMarket may have unknown cost basis.' },
+    })
+  } catch (error) {
+    res.status(503).json({ error: error instanceof Error ? error.message : 'Trading history could not be loaded' })
   }
 })
 
@@ -2959,7 +3111,9 @@ app.get('/api/collections', async (_req, res) => {
   try {
     await ensureSchema()
     const rows = await query(
-      `SELECT c.id, c.slug, c.name, c.symbol, c.description, c.cover, c.owner_wallet,
+      `SELECT c.id, c.slug, c.name, c.symbol, c.description,
+              CASE WHEN c.revealed THEN COALESCE((SELECT NULLIF(n.image, '') FROM nft_mints n WHERE n.collection_id = c.slug ORDER BY n.created_at ASC NULLS LAST, n.token_id ASC LIMIT 1), c.cover) ELSE c.cover END AS cover,
+              c.owner_wallet,
               c.contract_id, c.total_supply, c.website_url, c.social_links, c.revealed, c.is_verified, c.verification_status, COALESCE(m.nft_count, 0)::int AS nft_count,
               EXISTS (
                 SELECT 1 FROM mint_stages s
@@ -3452,55 +3606,223 @@ function humanizeKind(kind: string): string {
 }
 
 // ---- Admin: collection verification ----
-// Verification is collection-level (the buyer-facing trust signal at the point
-// of sale) and is decided by an admin. Approving a collection also marks its
-// owner as a verified creator (the secondary "known artist" badge), but the two
-// stay separable: a verified user's unverified collections remain unverified.
+// User and collection badges are administered independently.
 
-app.get('/api/admin/collections/review', requireAdmin, async (req, res) => {
-  const status = String(req.query?.status ?? 'pending')
+app.get('/api/verification/user', requireWallet, async (_req, res) => {
+  const wallet = res.locals.wallet as string
   try {
     await ensureSchema()
-    const valid = ['pending', 'approved', 'rejected'].includes(status) ? status : 'pending'
-    const rows = await query<{ id: number; slug: string; name: string; symbol: string; description: string; cover: string; owner_wallet: string; is_verified: boolean; verification_status: string; verified_by: string | null; verified_at: string | null; created_at: string }[]>(
-      'SELECT id, slug, name, symbol, description, cover, owner_wallet, is_verified, verification_status, verified_by, verified_at, created_at FROM collections WHERE verification_status = ? ORDER BY created_at ASC',
-      [valid],
+    const rows = await query<{ id: number; status: string; reason: string; evidence_url: string | null; submitted_at: string; review_note: string | null }[]>(
+      `SELECT id, status, reason, evidence_url, submitted_at, review_note FROM verification_applications
+       WHERE entity_type='user' AND LOWER(subject_id)=LOWER(?) ORDER BY submitted_at DESC LIMIT 1`, [wallet],
     )
-    const withOwner = []
-    for (const row of rows) {
-      const owner = await query<{ display_name: string }[]>('SELECT display_name FROM user_profiles WHERE wallet_address = ?', [row.owner_wallet])
-      withOwner.push({ ...row, owner_name: owner[0]?.display_name ?? '' })
-    }
-    res.json({ collections: withOwner })
+    res.json({ application: rows[0] ?? null })
+  } catch (error) { res.status(503).json({ error: error instanceof Error ? error.message : 'Could not load verification status' }) }
+})
+
+app.post('/api/verification/user', requireWallet, async (req, res) => {
+  const wallet = res.locals.wallet as string
+  const reason = String(req.body?.reason ?? '').trim().slice(0, 2000)
+  const evidence = safePublicUrl(req.body?.evidenceUrl)
+  if (reason.length < 20) return res.status(400).json({ error: 'Please explain your verification request in at least 20 characters.' })
+  try {
+    await ensureSchema()
+    const profile = await query<{ is_verified: boolean }[]>('SELECT is_verified FROM user_profiles WHERE LOWER(wallet_address)=LOWER(?)', [wallet])
+    if (!profile.length) return res.status(404).json({ error: 'Create your profile before applying for verification.' })
+    if (profile[0].is_verified) return res.status(409).json({ error: 'This profile is already verified.' })
+    const pending = await query<{ id: number }[]>(`SELECT id FROM verification_applications WHERE entity_type='user' AND LOWER(subject_id)=LOWER(?) AND status='pending' LIMIT 1`, [wallet])
+    if (pending.length) return res.status(409).json({ error: 'Your verification application is already under review.' })
+    const rows = await query<{ id: number; status: string; submitted_at: string }[]>(
+      `INSERT INTO verification_applications (entity_type, subject_id, applicant_wallet, reason, evidence_url, status, submitted_at)
+       VALUES ('user', ?, ?, ?, ?, 'pending', now()) ON CONFLICT DO NOTHING RETURNING id, status, submitted_at`, [wallet, wallet, reason, evidence],
+    )
+    if (!rows.length) return res.status(409).json({ error: 'Your verification application is already under review.' })
+    res.status(201).json({ application: rows[0] })
+  } catch (error) { res.status(503).json({ error: error instanceof Error ? error.message : 'Could not submit verification application' }) }
+})
+
+app.get('/api/collections/:slug/verification', requireWallet, async (req, res) => {
+  const wallet = res.locals.wallet as string
+  const slugValue = String(req.params.slug ?? '').slice(0, 160)
+  try {
+    await ensureSchema()
+    const collection = await query<{ owner_wallet: string; is_verified: boolean }[]>('SELECT owner_wallet, is_verified FROM collections WHERE LOWER(slug)=LOWER(?)', [slugValue])
+    if (!collection.length) return res.status(404).json({ error: 'Collection not found' })
+    if (collection[0].owner_wallet.toLowerCase() !== wallet.toLowerCase()) return res.status(403).json({ error: 'Only the collection owner can view its verification application.' })
+    const rows = await query<{ id: number; status: string; reason: string; evidence_url: string | null; submitted_at: string; review_note: string | null }[]>(
+      `SELECT id, status, reason, evidence_url, submitted_at, review_note FROM verification_applications
+       WHERE entity_type='collection' AND LOWER(subject_id)=LOWER(?) ORDER BY submitted_at DESC LIMIT 1`, [slugValue],
+    )
+    res.json({ isVerified: collection[0].is_verified, application: rows[0] ?? null })
+  } catch (error) { res.status(503).json({ error: error instanceof Error ? error.message : 'Could not load verification status' }) }
+})
+
+app.post('/api/collections/:slug/verification', requireWallet, async (req, res) => {
+  const wallet = res.locals.wallet as string
+  const slugValue = String(req.params.slug ?? '').slice(0, 160)
+  const reason = String(req.body?.reason ?? '').trim().slice(0, 2000)
+  const evidence = safePublicUrl(req.body?.evidenceUrl)
+  if (reason.length < 20) return res.status(400).json({ error: 'Please explain your verification request in at least 20 characters.' })
+  try {
+    await ensureSchema()
+    const collection = await query<{ owner_wallet: string; is_verified: boolean }[]>('SELECT owner_wallet, is_verified FROM collections WHERE LOWER(slug)=LOWER(?)', [slugValue])
+    if (!collection.length) return res.status(404).json({ error: 'Collection not found' })
+    if (collection[0].owner_wallet.toLowerCase() !== wallet.toLowerCase()) return res.status(403).json({ error: 'Only the collection owner can apply for its badge.' })
+    if (collection[0].is_verified) return res.status(409).json({ error: 'This collection is already verified.' })
+    const pending = await query<{ id: number }[]>(`SELECT id FROM verification_applications WHERE entity_type='collection' AND LOWER(subject_id)=LOWER(?) AND status='pending' LIMIT 1`, [slugValue])
+    if (pending.length) return res.status(409).json({ error: 'This collection application is already under review.' })
+    const rows = await query<{ id: number; status: string; submitted_at: string }[]>(
+      `INSERT INTO verification_applications (entity_type, subject_id, applicant_wallet, reason, evidence_url, status, submitted_at)
+       VALUES ('collection', ?, ?, ?, ?, 'pending', now()) ON CONFLICT DO NOTHING RETURNING id, status, submitted_at`, [slugValue, wallet, reason, evidence],
+    )
+    if (!rows.length) return res.status(409).json({ error: 'This collection application is already under review.' })
+    await query(`UPDATE collections SET verification_status='pending' WHERE LOWER(slug)=LOWER(?)`, [slugValue])
+    res.status(201).json({ application: rows[0] })
+  } catch (error) { res.status(503).json({ error: error instanceof Error ? error.message : 'Could not submit verification application' }) }
+})
+
+app.get('/api/admin/dashboard', requireAdmin, async (req, res) => {
+  try {
+    const range = ['7d','30d','90d','all'].includes(String(req.query.range)) ? String(req.query.range) : '30d'
+    const days = range === '7d' ? 7 : range === '90d' ? 90 : 30
+    const dateFilter = range === 'all' ? '' : `AND created_at >= current_date - interval '${days - 1} days'`
+    const priorDateFilter = range === 'all' ? '' : `AND created_at >= current_date - interval '${days * 2 - 1} days' AND created_at < current_date - interval '${days - 1} days'`
+    const saleEvents = `SELECT DISTINCT ON (tx_hash, contract_id, payload->'value'->>4) created_at, tx_hash, contract_id,
+       CASE WHEN payload->'value'->>5 ~ '^[0-9]+$' THEN (payload->'value'->>5)::numeric / 10000000 ELSE 0 END AS amount_xlm
+       FROM marketplace_events WHERE event_type IN ('sale','offer_s','offer_sale','c_sale','t_sale','auc_s','auction_sale') ${dateFilter}
+       ORDER BY tx_hash, contract_id, payload->'value'->>4, CASE event_type WHEN 'sale' THEN 0 WHEN 'offer_s' THEN 1 WHEN 'auc_s' THEN 2 ELSE 3 END`
+    const priorSaleEvents = `SELECT DISTINCT ON (tx_hash, contract_id, payload->'value'->>4) created_at, tx_hash, contract_id,
+       CASE WHEN payload->'value'->>5 ~ '^[0-9]+$' THEN (payload->'value'->>5)::numeric / 10000000 ELSE 0 END AS amount_xlm
+       FROM marketplace_events WHERE event_type IN ('sale','offer_s','offer_sale','c_sale','t_sale','auc_s','auction_sale') ${priorDateFilter}
+       ORDER BY tx_hash, contract_id, payload->'value'->>4, CASE event_type WHEN 'sale' THEN 0 WHEN 'offer_s' THEN 1 WHEN 'auc_s' THEN 2 ELSE 3 END`
+    const [summary, daily, sales, collections] = await Promise.all([
+      query<Record<string, number | string>[]>(
+        `WITH sold AS (${saleEvents}), prior_sold AS (${priorSaleEvents}) SELECT
+          (SELECT COUNT(*)::int FROM user_profiles) AS users,
+          (SELECT COUNT(*)::int FROM user_profiles WHERE is_creator=TRUE) AS creators,
+          (SELECT COUNT(*)::int FROM user_profiles WHERE is_verified=TRUE) AS verified_users,
+          (SELECT COUNT(*)::int FROM collections) AS collections,
+          (SELECT COUNT(*)::int FROM collections WHERE is_verified=TRUE) AS verified_collections,
+          (SELECT COUNT(*)::int FROM verification_applications WHERE status='pending') AS pending_applications,
+          (SELECT COUNT(*)::int FROM verified_nft_mints) AS confirmed_mints,
+          (SELECT COUNT(*)::int FROM verified_nft_mints WHERE ${range === 'all' ? 'TRUE' : `created_at >= current_date - interval '${days - 1} days'`}) AS period_mints,
+          (SELECT COUNT(*)::int FROM sold) AS period_sales,
+          (SELECT COALESCE(SUM(amount_xlm),0)::numeric(24,2)::text FROM sold) AS period_volume_xlm,
+          (SELECT COUNT(DISTINCT wallet)::int FROM (
+             SELECT LOWER(minter) AS wallet FROM verified_nft_mints WHERE ${range === 'all' ? 'TRUE' : `created_at >= current_date - interval '${days - 1} days'`}
+             UNION SELECT LOWER(COALESCE(payload->'value'->>1,'')) FROM marketplace_events WHERE event_type IN ('sale','offer_s','offer_sale','c_sale','t_sale','auc_s','auction_sale') ${dateFilter}
+             UNION SELECT LOWER(COALESCE(payload->'value'->>2,'')) FROM marketplace_events WHERE event_type IN ('sale','offer_s','offer_sale','c_sale','t_sale','auc_s','auction_sale') ${dateFilter}
+          ) wallets WHERE wallet LIKE 'g%') AS active_transacting_wallets,
+          (SELECT COUNT(*)::int FROM collections WHERE ${range === 'all' ? 'TRUE' : `created_at >= current_date - interval '${days - 1} days'`}) AS period_collections,
+          (SELECT COUNT(*)::int FROM user_profiles WHERE ${range === 'all' ? 'TRUE' : `created_at >= current_date - interval '${days - 1} days'`}) AS period_users,
+          ${range === 'all' ? `NULL::int` : `(SELECT COUNT(*)::int FROM user_profiles WHERE created_at >= current_date - interval '${days * 2 - 1} days' AND created_at < current_date - interval '${days - 1} days')`} AS prior_users,
+          ${range === 'all' ? `NULL::int` : `(SELECT COUNT(*)::int FROM collections WHERE created_at >= current_date - interval '${days * 2 - 1} days' AND created_at < current_date - interval '${days - 1} days')`} AS prior_collections,
+          ${range === 'all' ? `NULL::int` : `(SELECT COUNT(*)::int FROM verified_nft_mints WHERE created_at >= current_date - interval '${days * 2 - 1} days' AND created_at < current_date - interval '${days - 1} days')`} AS prior_mints,
+          ${range === 'all' ? `NULL::int` : `(SELECT COUNT(*)::int FROM prior_sold)`} AS prior_sales,
+          ${range === 'all' ? `'0'::text` : `(SELECT COALESCE(SUM(amount_xlm),0)::numeric(24,2)::text FROM prior_sold)`} AS prior_volume_xlm`,
+      ),
+      query<{ day: string; users: number; collections: number; mints: number; sales: number; volume_xlm: string }[]>(
+        `WITH days AS (SELECT generate_series(current_date - interval '${days - 1} days', current_date, interval '1 day')::date AS activity_date),
+         user_days AS (SELECT created_at::date AS activity_date, COUNT(*)::int AS users FROM user_profiles WHERE ${range === 'all' ? `created_at >= current_date - interval '89 days'` : `created_at >= current_date - interval '${days - 1} days'`} GROUP BY 1),
+         collection_days AS (SELECT created_at::date AS activity_date, COUNT(*)::int AS collections FROM collections WHERE ${range === 'all' ? `created_at >= current_date - interval '89 days'` : `created_at >= current_date - interval '${days - 1} days'`} GROUP BY 1),
+         mint_days AS (SELECT created_at::date AS activity_date, COUNT(*)::int AS mints FROM verified_nft_mints WHERE ${range === 'all' ? `created_at >= current_date - interval '89 days'` : `created_at >= current_date - interval '${days - 1} days'`} GROUP BY 1),
+         sold AS (${saleEvents}), sale_days AS (SELECT created_at::date AS activity_date, COUNT(*)::int AS sales, COALESCE(SUM(amount_xlm),0)::numeric(24,2)::text AS volume_xlm FROM sold GROUP BY 1)
+         SELECT to_char(days.activity_date,'YYYY-MM-DD') AS day, COALESCE(user_days.users,0)::int AS users, COALESCE(collection_days.collections,0)::int AS collections,
+         COALESCE(mint_days.mints,0)::int AS mints, COALESCE(sale_days.sales,0)::int AS sales, COALESCE(sale_days.volume_xlm,'0') AS volume_xlm
+         FROM days LEFT JOIN user_days USING(activity_date) LEFT JOIN collection_days USING(activity_date) LEFT JOIN mint_days USING(activity_date) LEFT JOIN sale_days USING(activity_date) ORDER BY days.activity_date`,
+      ),
+      query<Record<string, string | number>[]>(
+        `WITH sold AS (${saleEvents}) SELECT s.created_at, s.tx_hash, s.amount_xlm::numeric(24,2)::text AS amount_xlm,
+          e.payload->'value'->>1 AS buyer, e.payload->'value'->>2 AS seller, e.payload->'value'->>3 AS nft_contract,
+          e.payload->'value'->>4 AS token_id, COALESCE(m.title,'NFT') AS title
+         FROM sold s JOIN marketplace_events e ON e.tx_hash=s.tx_hash AND e.contract_id=s.contract_id
+         LEFT JOIN nft_mints m ON LOWER(m.contract_id)=LOWER(e.payload->'value'->>3) AND m.token_id=NULLIF(e.payload->'value'->>4,'')::int
+         ORDER BY s.created_at DESC LIMIT 12`,
+      ),
+      query<Record<string, string | number>[]>(
+        `SELECT c.slug, c.name,
+                CASE WHEN c.revealed THEN COALESCE((SELECT NULLIF(n.image, '') FROM nft_mints n WHERE n.collection_id = c.slug ORDER BY n.created_at ASC NULLS LAST, n.token_id ASC LIMIT 1), c.cover) ELSE c.cover END AS cover,
+                COUNT(v.token_id)::int AS confirmed_mints
+         FROM collections c LEFT JOIN nft_mints m ON m.collection_id=c.slug
+         LEFT JOIN verified_nft_mints v ON LOWER(v.contract_id)=LOWER(m.contract_id) AND v.token_id=m.token_id
+         GROUP BY c.slug,c.name,c.cover,c.revealed ORDER BY confirmed_mints DESC,c.name ASC LIMIT 8`,
+      ),
+    ])
+    res.json({ generatedAt: new Date().toISOString(), range, summary: summary[0] ?? {}, daily, recentSales: sales, topCollections: collections,
+      definitions: { sales: 'Unique indexed marketplace sale events', volume: 'Sale event amounts converted from stroops to XLM; excludes primary mints', activeWallets: 'Distinct wallets that minted or appeared as buyer or seller in indexed sale events during the selected period' } })
   } catch (error) {
-    res.status(503).json({ error: error instanceof Error ? error.message : 'Review query failed' })
+    res.status(503).json({ error: error instanceof Error ? error.message : 'Admin dashboard query failed' })
   }
 })
 
-app.post('/api/admin/collections/:id/verify', requireAdmin, async (req, res) => {
+app.get('/api/admin/users', requireAdmin, async (req, res) => {
+  const search = String(req.query?.search ?? '').trim().slice(0, 100)
+  const pattern = search ? `%${search}%` : ''
+  try {
+    const users = await query<{ wallet_address: string; email: string | null; display_name: string; creator_username: string | null; avatar: string; is_creator: boolean; is_verified: boolean; is_admin: boolean; created_at: string; collections_count: number; minted_count: number }[]>(
+      `SELECT p.wallet_address, p.email, p.display_name, p.creator_username, p.avatar, p.is_creator, p.is_verified, p.is_admin, p.created_at,
+              COALESCE(c.collections_count,0)::int AS collections_count,
+              COALESCE(m.minted_count,0)::int AS minted_count
+       FROM user_profiles p
+       LEFT JOIN LATERAL (SELECT COUNT(*)::int AS collections_count FROM collections WHERE LOWER(owner_wallet)=LOWER(p.wallet_address)) c ON TRUE
+       LEFT JOIN LATERAL (SELECT COUNT(*)::int AS minted_count FROM verified_nft_mints WHERE LOWER(minter)=LOWER(p.wallet_address)) m ON TRUE
+       WHERE ?='' OR LOWER(p.wallet_address) LIKE LOWER(?)
+          OR LOWER(COALESCE(p.email,'')) LIKE LOWER(?)
+          OR LOWER(COALESCE(p.display_name,'')) LIKE LOWER(?)
+          OR LOWER(COALESCE(p.creator_username,'')) LIKE LOWER(?)
+       ORDER BY p.created_at DESC LIMIT 100`, [search, pattern, pattern, pattern, pattern],
+    )
+    res.json({ users })
+  } catch (error) {
+    res.status(503).json({ error: error instanceof Error ? error.message : 'Admin user search failed' })
+  }
+})
+
+app.get('/api/admin/verification-applications', requireAdmin, async (req, res) => {
+  const status = ['pending','approved','rejected'].includes(String(req.query.status)) ? String(req.query.status) : 'pending'
+  const entity = ['user','collection'].includes(String(req.query.entity)) ? String(req.query.entity) : ''
+  try {
+    const rows = await query<Record<string, string | number | boolean | null>[]>(
+      `SELECT a.id,a.entity_type,a.subject_id,a.applicant_wallet,a.reason,a.evidence_url,a.status,a.submitted_at,a.reviewed_at,a.review_note,
+        p.display_name,p.creator_username,p.email,p.avatar,p.is_verified,
+        c.name AS collection_name,c.symbol AS collection_symbol,
+        CASE WHEN c.revealed THEN COALESCE((SELECT NULLIF(n.image, '') FROM nft_mints n WHERE n.collection_id = c.slug ORDER BY n.created_at ASC NULLS LAST, n.token_id ASC LIMIT 1), c.cover) ELSE c.cover END AS collection_cover
+       FROM verification_applications a LEFT JOIN user_profiles p ON LOWER(p.wallet_address)=LOWER(a.applicant_wallet)
+       LEFT JOIN collections c ON a.entity_type='collection' AND LOWER(c.slug)=LOWER(a.subject_id)
+       WHERE a.status=? AND (?='' OR a.entity_type=?) ORDER BY a.submitted_at DESC LIMIT 100`, [status, entity, entity],
+    )
+    res.json({ applications: rows })
+  } catch (error) { res.status(503).json({ error: error instanceof Error ? error.message : 'Verification applications unavailable' }) }
+})
+
+app.post('/api/admin/verification-applications/:id/review', requireAdmin, async (req, res) => {
   const admin = res.locals.wallet as string
   const id = Number(req.params.id)
-  const action = String(req.body?.action ?? 'approve')
-  if (!['approve', 'reject'].includes(action)) return res.status(400).json({ error: 'Action must be approve or reject' })
+  const action = String(req.body?.action ?? '')
+  const note = String(req.body?.note ?? '').trim().slice(0, 1000)
+  if (!Number.isSafeInteger(id) || id < 1 || !['approve','reject'].includes(action)) return res.status(400).json({ error: 'Choose approve or reject for a valid application.' })
   try {
-    await ensureSchema()
-    const col = await query<{ id: number; owner_wallet: string }[]>('SELECT id, owner_wallet FROM collections WHERE id = ?', [id])
-    if (!col.length) return res.status(404).json({ error: 'Collection not found' })
-    const isVerified = action === 'approve'
-    const status = action === 'approve' ? 'approved' : 'rejected'
-    await query(
-      'UPDATE collections SET is_verified = ?, verification_status = ?, verified_by = ?, verified_at = now() WHERE id = ?',
-      [isVerified, status, admin, id],
-    )
-    const message = isVerified ? `Collection #${id} approved` : `Collection #${id} rejected`
-    // Collection-approval marks the owner as a verified creator (secondary badge).
-    if (isVerified) {
-      await query('UPDATE user_profiles SET is_verified = TRUE, updated_at = now() WHERE wallet_address = ?', [col[0].owner_wallet])
-    }
-    res.json({ ok: true, id, isVerified, verificationStatus: status })
-  } catch (error) {
-    res.status(503).json({ error: error instanceof Error ? error.message : 'Verification update failed' })
-  }
+    const approved = action === 'approve'
+    const application = await withTransaction(async () => {
+      const rows = await query<{ id: number; entity_type: string; subject_id: string; applicant_wallet: string; status: string }[]>(
+        `UPDATE verification_applications SET status=?, reviewed_at=now(), reviewed_by=?, review_note=? WHERE id=? AND status='pending' RETURNING id,entity_type,subject_id,applicant_wallet,status`,
+        [approved ? 'approved' : 'rejected', admin, note || null, id],
+      )
+      if (!rows.length) return null
+      const item = rows[0]
+      if (item.entity_type === 'user') {
+        const profile = await query<{ wallet_address: string }[]>('UPDATE user_profiles SET is_verified=?, updated_at=now() WHERE LOWER(wallet_address)=LOWER(?) RETURNING wallet_address', [approved, item.subject_id])
+        if (!profile.length) throw new Error('Applicant profile no longer exists')
+      } else {
+        const collection = await query<{ slug: string }[]>('UPDATE collections SET is_verified=?, verification_status=?, verified_by=?, verified_at=CASE WHEN ? THEN now() ELSE NULL END WHERE LOWER(slug)=LOWER(?) RETURNING slug',
+          [approved, approved ? 'approved' : 'rejected', approved ? admin : null, approved, item.subject_id])
+        if (!collection.length) throw new Error('Applicant collection no longer exists')
+      }
+      return item
+    })
+    if (!application) return res.status(404).json({ error: 'Pending verification application not found.' })
+    res.json({ ok: true, application: { ...application, status: approved ? 'approved' : 'rejected' } })
+  } catch (error) { res.status(503).json({ error: error instanceof Error ? error.message : 'Could not review verification application' }) }
 })
 
 app.get('/api/mail/status', requireAdmin, (_req, res) => {
@@ -4064,7 +4386,7 @@ app.post('/api/creator/metadata', requireWallet, async (req, res) => {
         [image, wallet],
       )
       : []
-    if (!uploadedImage.length && !uploadedCollectionCover.length && !(isPersonalMint && /^(https:\/\/|ipfs:\/\/)/i.test(image))) return res.status(400).json({ error: 'Upload this artwork to StellaNova before publishing metadata' })
+    if (!uploadedImage.length && !uploadedCollectionCover.length && !(isPersonalMint && /^(https:\/\/|ipfs:\/\/)/i.test(image))) return res.status(400).json({ error: 'Upload this artwork to NovaMarket before publishing metadata' })
     const assetUpload = uploadedImage[0] ?? uploadedCollectionCover[0] ?? null
     let animationUpload: { sha256: string; content_type: string; bytes: number; sha256_verified: boolean } | null = null
     if (animationUrl) {
@@ -4072,19 +4394,19 @@ app.post('/api/creator/metadata', requireWallet, async (req, res) => {
         'SELECT image_url, sha256, content_type, bytes, sha256_verified FROM creator_media_uploads WHERE image_url = ? AND collection_id = ? AND creator_wallet = ? LIMIT 1',
         [animationUrl, collectionId, wallet],
       )
-      if (!uploadedAnimation.length) return res.status(400).json({ error: 'Upload this animation, audio or 3D file to StellaNova before publishing metadata' })
+      if (!uploadedAnimation.length) return res.status(400).json({ error: 'Upload this animation, audio or 3D file to NovaMarket before publishing metadata' })
       animationUpload = uploadedAnimation[0]
     }
     const provenance = {
       version: 1,
-      issuer: 'StellaNova',
+      issuer: 'NovaMarket',
       creator_wallet: wallet,
       created_at: new Date().toISOString(),
       creation_method: creationMethod,
       artwork: assetUpload ? { sha256: assetUpload.sha256, content_type: assetUpload.content_type, bytes: assetUpload.bytes, server_verified: assetUpload.sha256_verified } : null,
       animation: animationUpload ? { sha256: animationUpload.sha256, content_type: animationUpload.content_type, bytes: animationUpload.bytes, server_verified: animationUpload.sha256_verified } : null,
       fingerprint_note: assetUpload?.sha256_verified
-        ? 'StellaNova independently verified this SHA-256 fingerprint against the uploaded file bytes. This record is not a copyright or authorship determination.'
+        ? 'NovaMarket independently verified this SHA-256 fingerprint against the uploaded file bytes. This record is not a copyright or authorship determination.'
         : 'This artwork has no server-verified file fingerprint. This record is not a copyright or authorship determination.',
     }
     const editionKey = editionGroup ? `nftgram/metadata/${collectionId}/editions/${editionGroup}/${editionIndex}.json` : null
@@ -4170,9 +4492,9 @@ if (isProduction && !isVercel) {
   const { createServer: createViteServer } = await import('vite')
   const vite = await createViteServer({ root, server: { middlewareMode: true, hmr: { server: httpServer } } })
   app.use(vite.middlewares)
-  httpServer.listen(port, '0.0.0.0', () => console.log(`StellaNova dev server listening on ${port}`))
+  httpServer.listen(port, '0.0.0.0', () => console.log(`NovaMarket dev server listening on ${port}`))
 }
 
-if (isProduction && !isVercel) app.listen(port, '0.0.0.0', () => console.log(`StellaNova production server listening on ${port}`))
+if (isProduction && !isVercel) app.listen(port, '0.0.0.0', () => console.log(`NovaMarket production server listening on ${port}`))
 
 export default app

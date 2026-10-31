@@ -3,7 +3,7 @@ import app from '../server/index.js'
 
 /** Route every `/api/*` request through the shared Express application. */
 export default function handler(req: IncomingMessage, res: ServerResponse) {
-  const incoming = new URL(req.url ?? '/', 'https://stellanova.invalid')
+  const incoming = new URL(req.url ?? '/', 'https://novamarket.invalid')
   const route = incoming.searchParams.get('__route')
 
   if (route) {

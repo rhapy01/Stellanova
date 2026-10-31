@@ -1,13 +1,13 @@
-# StellaNova media architecture decision
+# NovaMarket media architecture decision
 
 ## Recommendation
 
 Do **not** add Cloudinary and Cloudflare as overlapping media systems. Use one canonical storage path and, if needed, one delivery/optimization layer.
 
-For StellaNova, the recommended production shape is:
+For NovaMarket, the recommended production shape is:
 
 1. The NFT’s canonical metadata and original media live in immutable object storage or a content-addressed store. The token URI must remain stable and must not depend on a mutable thumbnail transformation.
-2. Cloudflare R2 is the better default for originals and JSON metadata when StellaNova needs S3-compatible storage, a custom media domain and low-egress delivery. Attach a production custom domain rather than relying on the `r2.dev` development URL.
+2. Cloudflare R2 is the better default for originals and JSON metadata when NovaMarket needs S3-compatible storage, a custom media domain and low-egress delivery. Attach a production custom domain rather than relying on the `r2.dev` development URL.
 3. Cloudflare Images or a small image-processing worker can provide responsive thumbnails and WebP/AVIF derivatives. Do not rewrite the canonical token URI to a derivative URL.
 4. Add Cloudinary only if the product needs its richer media workflow: signed uploads, automatic image analysis, advanced transformations, video processing or a non-engineering media library.
 
@@ -23,7 +23,7 @@ R2 buckets are private by default. Production access can be exposed through a cu
 
 Cloudflare Images can also store, optimize and deliver images through a managed API, and Cloudflare documents remote-image transformations when originals remain outside Images. [3]
 
-## StellaNova implementation boundary
+## NovaMarket implementation boundary
 
 The current Testnet contract uses a base metadata URI and the app has public contract IDs. The next production media step should add:
 

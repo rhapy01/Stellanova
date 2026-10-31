@@ -1,0 +1,9 @@
+{
+  "title": "NovaMarket Project Docs",
+  "description": "Repository, architecture, API, database, Stellar contracts, development, and operations documentation for NovaMarket.",
+  "language": "en",
+  "structure": {
+    "readme": "README.md",
+    "summary": "SUMMARY.md"
+  }
+}

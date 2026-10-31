@@ -41,7 +41,7 @@ export function Icon({ name, size = 20, strokeWidth = 1.8 }: { name: IconName; s
 }
 
 export function PrismMark({ small = false, size, className = '' }: { small?: boolean; size?: number; className?: string }) {
-  return <img className={`stellanova-mark ${small ? 'stellanova-mark--small' : ''} ${className}`} src="/icon-512.png" width={size ?? (small ? 29 : 36)} height={size ?? (small ? 29 : 36)} alt="" aria-hidden="true" />
+  return <img className={`stellanova-mark ${small ? 'stellanova-mark--small' : ''} ${className}`} src="/icon-512.png?v=original-logo" width={size ?? (small ? 29 : 36)} height={size ?? (small ? 29 : 36)} alt="" aria-hidden="true" />
 }
 
 export function mediaSource(src: string) {
@@ -55,8 +55,7 @@ export function Avatar({ src, alt, size = 'md', ring = false }: { src: string; a
   const className = `avatar avatar--${size} ${ring ? 'avatar--ring' : ''}`
   const [failed, setFailed] = useState(false)
   if (!src || failed) {
-    const initials = alt.trim().split(/\s+/).slice(0, 2).map((part) => part[0]).join('').toUpperCase()
-    return <span className={`${className} avatar--fallback`} role="img" aria-label={alt}>{initials}</span>
+    return <span className={`${className} avatar--fallback`} role="img" aria-label={alt}><Icon name="user" size={size === 'lg' ? 24 : size === 'md' ? 19 : 15} /></span>
   }
   return <img className={className} src={mediaSource(src)} alt={alt} onError={(event) => {
     const image = event.currentTarget

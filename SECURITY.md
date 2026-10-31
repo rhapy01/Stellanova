@@ -2,7 +2,7 @@
 
 ## Scope
 
-StellaNova is currently a Stellar Testnet social marketplace. The hosted app uses Vercel Functions and Firewall, an Express API, PostgreSQL, Privy wallet sessions, and Cloudinary or Cloudflare R2 for media. The app must never ask for or store a user's wallet seed phrase or signing key.
+NovaMarket is currently a Stellar Testnet social marketplace. The hosted app uses Vercel Functions and Firewall, an Express API, PostgreSQL, Privy wallet sessions, and Cloudinary or Cloudflare R2 for media. The app must never ask for or store a user's wallet seed phrase or signing key.
 
 ## Current protections
 

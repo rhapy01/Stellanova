@@ -84,6 +84,7 @@ export type OwnedNft = {
 
 const walletSessions = new Map<string, string>()
 const walletSessionStorageKey = 'nftgram:wallet-sessions'
+const lastWalletSessionStorageKey = 'nftgram:last-wallet-session'
 
 function persistWalletSessions() {
   if (typeof window === 'undefined') return
@@ -126,15 +127,41 @@ export async function authenticateWallet(wallet: StellarWallet) {
   const challengeResponse = await fetch('/api/auth/challenge', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ wallet: wallet.address }) })
   const challenge = await challengeResponse.json()
   if (!challengeResponse.ok) throw new Error(challenge.error ?? 'Could not start wallet sign-in')
-  const signature = await signWalletChallenge(challenge.message, wallet.address, wallet.networkPassphrase)
+  const signature = await signWalletChallenge(challenge.message, wallet.address, wallet.networkPassphrase, wallet.provider)
   const verifyResponse = await fetch('/api/auth/verify', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ wallet: wallet.address, challengeId: challenge.challengeId, signature, referralCode: pendingReferralCode() }) })
   const result = await verifyResponse.json()
   if (!verifyResponse.ok) throw new Error(result.error ?? 'Wallet sign-in failed')
   walletSessions.set(wallet.address, result.token)
   persistWalletSessions()
+  try {
+    window.sessionStorage.setItem(lastWalletSessionStorageKey, JSON.stringify({
+      address: wallet.address,
+      network: wallet.network,
+      networkPassphrase: wallet.networkPassphrase,
+      provider: wallet.provider,
+    }))
+  } catch { /* Wallet sign-in still works when session storage is unavailable. */ }
   clearPendingReferralCode()
   if (result.referralApplied === true) trackProductEvent('referral_attributed')
   if (result.newAccount === true) trackProductEvent('account_created', { flow: 'wallet' })
+}
+
+export function restoreWalletSession(): StellarWallet | null {
+  if (typeof window === 'undefined') return null
+  try {
+    const saved = JSON.parse(window.sessionStorage.getItem(lastWalletSessionStorageKey) ?? 'null') as Partial<StellarWallet> | null
+    if (!saved || typeof saved.address !== 'string' || !walletSessions.has(saved.address)) return null
+    if (!['PUBLIC', 'TESTNET', 'FUTURENET', 'STANDALONE'].includes(String(saved.network))) return null
+    if (typeof saved.networkPassphrase !== 'string' || !['Freighter', 'FreighterMobile', 'MetaMask', 'Privy'].includes(String(saved.provider))) return null
+    return {
+      address: saved.address,
+      network: saved.network as StellarWallet['network'],
+      networkPassphrase: saved.networkPassphrase,
+      provider: saved.provider as StellarWallet['provider'],
+    }
+  } catch {
+    return null
+  }
 }
 
 export function authHeaders(address: string): Record<string, string> {
@@ -146,6 +173,10 @@ export async function clearWalletSession(address: string) {
   const token = walletSessions.get(address)
   walletSessions.delete(address)
   persistWalletSessions()
+  try {
+    const saved = JSON.parse(window.sessionStorage.getItem(lastWalletSessionStorageKey) ?? 'null') as { address?: string } | null
+    if (saved?.address === address) window.sessionStorage.removeItem(lastWalletSessionStorageKey)
+  } catch { /* Ignore unavailable session storage. */ }
   if (token) await fetch('/api/auth/logout', { method: 'POST', headers: { authorization: `Bearer ${token}` } }).catch(() => undefined)
 }
 
@@ -155,7 +186,7 @@ function headers(address: string) {
 
 async function request<T>(url: string, address: string, init: RequestInit = {}) {
   const response = await fetch(url, { ...init, headers: { ...headers(address), ...(init.headers ?? {}) } })
-  if (!response.ok) throw new Error((await response.json().catch(() => null))?.error ?? `StellaNova API request failed (${response.status})`)
+  if (!response.ok) throw new Error((await response.json().catch(() => null))?.error ?? `NovaMarket API request failed (${response.status})`)
   return response.json() as Promise<T>
 }
 
@@ -617,19 +648,105 @@ export async function fetchCollectionMintHistory(slug: string): Promise<Collecti
   return data.wallets ?? []
 }
 
-export type ReviewCollection = WalletCollection & { owner_wallet: string; verified_by: string | null; verified_at: string | null; created_at: string }
+export type ReviewCollection = WalletCollection & { owner_wallet: string; owner_name?: string; owner_email?: string | null; owner_verified?: boolean; verified_by: string | null; verified_at: string | null; created_at: string; application_id: number; reason: string; evidence_url: string | null; submitted_at: string; application_status: string; review_note: string | null }
+export type VerificationApplication = { id: number; entity_type: 'user' | 'collection'; subject_id: string; applicant_wallet: string; reason: string; evidence_url: string | null; status: 'pending' | 'approved' | 'rejected'; submitted_at: string; reviewed_at?: string | null; review_note?: string | null; display_name?: string; creator_username?: string | null; email?: string | null; avatar?: string; is_verified?: boolean; collection_name?: string | null; collection_symbol?: string | null; collection_cover?: string | null }
+export type VerificationApplicationState = { id: number; status: 'pending' | 'approved' | 'rejected'; reason: string; evidence_url: string | null; submitted_at: string; review_note: string | null } | null
+
+export type AdminDashboardSnapshot = {
+  generatedAt: string
+  range: '7d' | '30d' | '90d' | 'all'
+  summary: { users: number; creators: number; verified_users: number; collections: number; verified_collections: number; pending_applications: number; confirmed_mints: number; period_mints: number; period_sales: number; period_volume_xlm: string; active_transacting_wallets: number; period_collections: number; period_users: number; prior_users: number | null; prior_collections: number | null; prior_mints: number | null; prior_sales: number | null; prior_volume_xlm: string }
+  daily: { day: string; users: number; collections: number; mints: number; sales: number; volume_xlm: string }[]
+  recentSales: Record<string, string | number>[]
+  topCollections: Record<string, string | number>[]
+  definitions: { sales: string; volume: string; activeWallets: string }
+}
+export type AdminUser = {
+  wallet_address: string
+  email: string | null
+  display_name: string
+  creator_username: string | null
+  avatar: string
+  is_creator: boolean
+  is_verified: boolean
+  is_admin: boolean
+  created_at: string
+  collections_count: number
+  minted_count: number
+}
+export async function fetchAdminDashboard(address: string) {
+  return request<AdminDashboardSnapshot>('/api/admin/dashboard', address, { cache: 'no-store' })
+}
+export async function fetchAdminAnalytics(address: string, range: '7d' | '30d' | '90d' | 'all' = '30d') {
+  return request<AdminDashboardSnapshot>(`/api/admin/dashboard?range=${range}`, address, { cache: 'no-store' })
+}
+export async function fetchAdminUsers(address: string, search = '') {
+  const result = await request<{ users: AdminUser[] }>(`/api/admin/users?search=${encodeURIComponent(search)}`, address, { cache: 'no-store' })
+  return result.users
+}
+export async function setAdminUserVerified(address: string, wallet: string, verified: boolean) {
+  return request<{ ok: boolean; wallet: string; isVerified: boolean }>(`/api/admin/users/${encodeURIComponent(wallet)}/verify`, address, { method: 'POST', body: JSON.stringify({ verified }) })
+}
 
 export async function fetchReviewCollections(address: string, status = 'pending') {
   return request<{ collections: ReviewCollection[] }>(`/api/admin/collections/review?status=${encodeURIComponent(status)}`, address)
 }
 
-export async function verifyCollection(address: string, id: number, action: 'approve' | 'reject') {
+export async function verifyCollection(address: string, id: number, action: 'approve' | 'reject' | 'unverify') {
   return request<{ ok: boolean; id: number; isVerified: boolean; verificationStatus: string }>(`/api/admin/collections/${id}/verify`, address, { method: 'POST', body: JSON.stringify({ action }) })
+}
+export async function fetchVerificationApplication(address: string, entity: 'user' | 'collection', subjectId?: string) {
+  const endpoint = entity === 'user' ? '/api/verification/user' : `/api/collections/${encodeURIComponent(subjectId ?? '')}/verification`
+  return request<{ application: VerificationApplicationState; isVerified?: boolean }>(endpoint, address, { cache: 'no-store' })
+}
+export async function submitVerificationApplication(address: string, entity: 'user' | 'collection', data: { reason: string; evidenceUrl?: string }, subjectId?: string) {
+  const endpoint = entity === 'user' ? '/api/verification/user' : `/api/collections/${encodeURIComponent(subjectId ?? '')}/verification`
+  return request<{ application: VerificationApplicationState }>(endpoint, address, { method: 'POST', body: JSON.stringify(data) })
+}
+export async function fetchAdminVerificationApplications(address: string, status: 'pending' | 'approved' | 'rejected', entity = '') {
+  return request<{ applications: VerificationApplication[] }>(`/api/admin/verification-applications?status=${status}&entity=${encodeURIComponent(entity)}`, address, { cache: 'no-store' })
+}
+export async function reviewVerificationApplication(address: string, id: number, action: 'approve' | 'reject', note = '') {
+  return request<{ ok: boolean }>(`/api/admin/verification-applications/${id}/review`, address, { method: 'POST', body: JSON.stringify({ action, note }) })
 }
 
 export async function fetchAccount(address: string) {
   const data = await request<{ account: UserAccount | null; isCreator: boolean; isAdmin: boolean; collections: WalletCollection[] }>('/api/account', address)
   return data
+}
+
+export type AccountTradingActivity = {
+  kind: 'mint' | 'purchase' | 'sale'
+  contractId: string
+  tokenId: number
+  txHash: string
+  ledger: number
+  occurredAt: string
+  amountStroops: string | null
+  paymentToken: string | null
+  title: string
+}
+export type AccountTradingSummary = {
+  minted: number
+  purchased: number
+  sold: number
+  mintSpendXlm: string
+  purchaseSpendXlm: string
+  saleProceedsXlm: string
+  netCashFlowXlm: string
+  realizedGrossGainXlm: string
+  knownCostBasisSales: number
+  unknownCostBasisSales: number
+}
+export type AccountTradingSnapshot = {
+  generatedAt: string
+  network: string
+  summary: AccountTradingSummary
+  activity: AccountTradingActivity[]
+  coverage: { indexedEvents: number; note: string }
+}
+export async function fetchAccountTradingActivity(address: string): Promise<AccountTradingSnapshot> {
+  return request<AccountTradingSnapshot>('/api/account/trading-activity', address)
 }
 
 export async function updateProfile(address: string, input: { displayName?: string; avatar?: string; bio?: string; creatorUsername?: string }) {
@@ -1031,7 +1148,7 @@ export async function recordMintedNft(address: string, input: MintRecordInput) {
       return result
     }
     const data = await response.json().catch(() => null)
-    if (response.status !== 409 || attempt === 19) throw new Error(`Mint #${input.tokenId} is confirmed on Stellar Testnet; metadata indexing is still pending and will retry safely. ${data?.error ?? `StellaNova API request failed (${response.status})`}`)
+    if (response.status !== 409 || attempt === 19) throw new Error(`Mint #${input.tokenId} is confirmed on Stellar Testnet; metadata indexing is still pending and will retry safely. ${data?.error ?? `NovaMarket API request failed (${response.status})`}`)
     await new Promise((resolve) => window.setTimeout(resolve, 1000))
   }
   throw new Error(`Mint #${input.tokenId} is confirmed on Stellar Testnet; metadata indexing is still pending and will retry safely.`)

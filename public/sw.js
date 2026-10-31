@@ -1,4 +1,4 @@
-const CACHE = 'stellanova-shell-v3'
+const CACHE = 'novamarket-shell-v2'
 const SHELL = ['/', '/manifest.webmanifest', '/icon.svg', '/manus-routes.json']
 
 self.addEventListener('install', (event) => {
@@ -8,7 +8,7 @@ self.addEventListener('install', (event) => {
 
 self.addEventListener('activate', (event) => {
   event.waitUntil(Promise.all([
-    caches.keys().then((keys) => Promise.all(keys.filter((key) => key.startsWith('nftgram-shell-') || key.startsWith('stellanova-shell-')).filter((key) => key !== CACHE).map((key) => caches.delete(key)))),
+    caches.keys().then((keys) => Promise.all(keys.filter((key) => key.startsWith('nftgram-shell-') || key.startsWith('stellanova-shell-') || key.startsWith('novamarket-shell-')).filter((key) => key !== CACHE).map((key) => caches.delete(key)))),
     self.clients.claim(),
   ]))
 })
@@ -47,15 +47,15 @@ self.addEventListener('fetch', (event) => {
 self.addEventListener('push', (event) => {
   let payload = {}
   try { payload = event.data ? event.data.json() : {} } catch { payload = { body: event.data?.text() ?? '' } }
-  const title = typeof payload.title === 'string' && payload.title ? payload.title : 'StellaNova activity'
-  const body = typeof payload.body === 'string' ? payload.body : 'There is new activity on StellaNova.'
+  const title = typeof payload.title === 'string' && payload.title ? payload.title : 'NovaMarket activity'
+  const body = typeof payload.body === 'string' ? payload.body : 'There is new activity on NovaMarket.'
   const url = typeof payload.url === 'string' && payload.url.startsWith('/') ? payload.url : '/account'
   event.waitUntil(self.registration.showNotification(title, {
     body,
     icon: '/icon-192.png',
     badge: '/icon-192.png',
     data: { url },
-    tag: `stellanova-${Date.now()}`,
+    tag: `novamarket-${Date.now()}`,
   }))
 })
 

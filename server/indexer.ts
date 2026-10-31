@@ -74,7 +74,7 @@ async function projectMintMetadata(contractId: string, tokenId: number, minter: 
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT (metadata_uri) DO NOTHING`,
     // Metadata discovered from arbitrary contracts is not treated as a
-    // StellaNova-issued provenance record, even if it contains a similarly
+    // NovaMarket-issued provenance record, even if it contains a similarly
     // named JSON property. Internal creator metadata is inserted at upload.
     [metadataUri, scope.toLowerCase(), null, objectKey, sha256, body.length, name, description, image, animationUrl, attributes, {}],
   )
@@ -199,7 +199,7 @@ async function applyEvent(event: any) {
       if (owner) {
         const title = await resolveNftTitle(data[2], Number(data[3]))
         const nftPath = `/nft/minted-${String(data[2]).toLowerCase()}-${data[3]}`
-        const appUrl = (process.env.PUBLIC_APP_URL ?? process.env.APP_URL ?? 'https://stellanova-fawn.vercel.app').replace(/\/$/, '')
+        const appUrl = (process.env.PUBLIC_APP_URL ?? process.env.APP_URL ?? 'https://novamarket-a2p.pages.dev').replace(/\/$/, '')
         const nftUrl = new URL(nftPath, appUrl).toString()
         const body = `A buyer made an offer of ${formatOfferAmount(data[5])} XLM on “${title}” (Token #${data[3]}).\n\nView the NFT and review the offer: ${nftUrl}`
         await notifyWallet(owner, 'offer', 'You received an offer', body)
@@ -377,12 +377,12 @@ async function emailWallet(wallet: unknown, subject: string, body: string, actio
   const profile = await query<{ email: string | null }[]>('SELECT email FROM user_profiles WHERE LOWER(wallet_address) = LOWER(?) LIMIT 1', [wallet])
   const email = profile[0]?.email?.trim()
   if (!email) return false
-  const emailContent = marketplaceEmail(subject, body, actionUrl, 'View NFT on StellaNova')
+  const emailContent = marketplaceEmail(subject, body, actionUrl, 'View NFT on NovaMarket')
   return (await sendMail({ to: email, subject, ...emailContent })).sent
 }
 
 function nftDetailUrl(contractId: unknown, tokenId: unknown) {
-  const appUrl = (process.env.PUBLIC_APP_URL ?? process.env.APP_URL ?? 'https://stellanova-fawn.vercel.app').replace(/\/$/, '')
+  const appUrl = (process.env.PUBLIC_APP_URL ?? process.env.APP_URL ?? 'https://novamarket-a2p.pages.dev').replace(/\/$/, '')
   const nftId = `minted-${String(contractId).toLowerCase()}-${Number(tokenId)}`
   return new URL(`/nft/${encodeURIComponent(nftId)}`, appUrl).toString()
 }

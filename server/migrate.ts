@@ -5,7 +5,7 @@ loadEnv()
 
 try {
   await ensureSchema()
-  console.log('StellaNova database schema is ready')
+  console.log('NovaMarket database schema is ready')
 } finally {
   await closeDatabase()
 }

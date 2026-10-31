@@ -70,7 +70,7 @@ export const sampleCollectionSlugs = new Set([
 ])
 
 // Marketplace content comes from indexed Testnet records. Keep these empty so
-// no curated or fabricated records can appear as live StellaNova activity.
+// no curated or fabricated records can appear as live NovaMarket activity.
 export const creators: Creator[] = []
 export const collections: Collection[] = []
 export const nfts: NFT[] = []

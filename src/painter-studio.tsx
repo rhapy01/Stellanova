@@ -233,7 +233,7 @@ export function PainterStudioPage({ collections, busy, error, success, onMint, o
     return new File([await canvasBlob(canvasRef.current)], `${(title.trim() || 'painting').toLowerCase().replace(/[^a-z0-9]+/g, '-')}.png`, { type: 'image/png' })
   }
   const postArtwork = async () => {
-    try { onPostToFeed(await exportArtwork(), [title.trim(), description.trim()].filter(Boolean).join('\n\n') || 'Original painting created in StellaNova Painter & Mural Studio') }
+    try { onPostToFeed(await exportArtwork(), [title.trim(), description.trim()].filter(Boolean).join('\n\n') || 'Original painting created in NovaMarket Painter & Mural Studio') }
     catch (cause) { setLocalError(cause instanceof Error ? cause.message : 'Could not prepare this painting for the feed') }
   }
   const prepareMint = async () => {

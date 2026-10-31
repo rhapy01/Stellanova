@@ -14,3 +14,5 @@ contracts/**/target
 .env*
 .testnet-sample-content.json
 *.log
+
+.env*

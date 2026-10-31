@@ -3,7 +3,7 @@ import { ensureSchema, query } from './db.js'
 
 const publicKey = process.env.WEB_PUSH_PUBLIC_KEY?.trim() ?? ''
 const privateKey = process.env.WEB_PUSH_PRIVATE_KEY?.trim() ?? ''
-const subject = process.env.WEB_PUSH_SUBJECT?.trim() || 'https://stelanova.vercel.app/'
+const subject = process.env.WEB_PUSH_SUBJECT?.trim() || 'https://novamarket-a2p.pages.dev/'
 const pushReady = Boolean(publicKey && privateKey)
 
 if (pushReady) webpush.setVapidDetails(subject, publicKey, privateKey)

@@ -113,7 +113,7 @@ const scAddress = (value: string) => StellarSdk.nativeToScVal(value, { type: 'ad
 let nftContractId = process.env.STELLAR_DEPLOYED_NFT_CONTRACT_ID ?? ''
 if (!/^C[A-Z2-7]{55}$/.test(nftContractId)) {
   console.log(`Deploying updated NFT contract from wallet ${publicKey}…`)
-  nftContractId = await uploadAndDeploy('public/contracts/nftgram_nft.wasm', [scString(metadataBaseUri), scString('StellaNova Editions'), scString('STNV'), scAddress(publicKey)])
+  nftContractId = await uploadAndDeploy('public/contracts/nftgram_nft.wasm', [scString(metadataBaseUri), scString('NovaMarket Editions'), scString('STNV'), scAddress(publicKey)])
   setEnvValue('STELLAR_DEPLOYED_NFT_CONTRACT_ID', nftContractId)
 } else {
   console.log(`Resuming setup for NFT contract ${nftContractId}…`)

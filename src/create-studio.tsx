@@ -274,7 +274,7 @@ export function PixelStudioPage({ collections, busy, error, success, onMint, onH
     paintPixel(output, finalFrame.frames[0], finalFrame.width, finalFrame.height, false, colors, backgroundColor)
     const blob = await new Promise<Blob | null>((resolve) => output.toBlob(resolve, 'image/png'))
     if (!blob) return
-    onPostToFeed(new File([blob], `${(title.trim() || 'pixel-art').toLowerCase().replace(/[^a-z0-9]+/g, '-')}.png`, { type: 'image/png' }), [title.trim(), description.trim()].filter(Boolean).join('\n\n') || 'Original pixel art created in StellaNova Pixel Studio')
+    onPostToFeed(new File([blob], `${(title.trim() || 'pixel-art').toLowerCase().replace(/[^a-z0-9]+/g, '-')}.png`, { type: 'image/png' }), [title.trim(), description.trim()].filter(Boolean).join('\n\n') || 'Original pixel art created in NovaMarket Pixel Studio')
   }
   const mintDraft = async () => {
     if (!title.trim() || !draftReady) return

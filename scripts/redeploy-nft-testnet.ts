@@ -99,7 +99,7 @@ const deployed = await submit(StellarSdk.Operation.createCustomContract({
   salt: crypto.randomBytes(32),
   constructorArgs: [
     StellarSdk.nativeToScVal(baseUri, { type: 'string' }),
-    StellarSdk.nativeToScVal('StellaNova Editions', { type: 'string' }),
+    StellarSdk.nativeToScVal('NovaMarket Editions', { type: 'string' }),
     StellarSdk.nativeToScVal('STNV', { type: 'string' }),
     StellarSdk.nativeToScVal(deployer, { type: 'address' }),
   ],

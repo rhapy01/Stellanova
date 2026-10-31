@@ -1,32 +1,38 @@
 import { createContext, createElement, lazy, Suspense, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react'
 import { collectionFor, collections, creatorFor, creators, nfts, sampleCollectionSlugs, type Collection, type Creator, type NFT } from './data'
 import { Avatar, Button, Icon, mediaSource, Meta, PrismMark, Toast, Verified } from './ui'
-import { connectFreighter, shortenStellarAddress, STELLAR_EXPLORER_URL, type StellarWallet } from './lib/stellar'
+import { connectFreighter, connectMetaMaskStellar, disconnectMetaMaskStellar, shortenStellarAddress, STELLAR_EXPLORER_URL, STELLAR_NETWORK, type StellarWallet } from './lib/stellar'
 import { deploySorobanWasm, invokeSoroban, invokeSorobanBatch, simulateSorobanRead, mintNftWithMetadata, mintFromStage, setCreatorStage, removeCreatorStage, whitelistCreatorWallet, whitelistCreatorWalletBatch, setCreatorReveal, setCreatorTokenUris, getCreatorCollectionTokenIds, getSorobanNftContractId, sendXlmTip } from './lib/deploy'
 import * as StellarSdk from '@stellar/stellar-sdk'
 import { sorobanMarketplaceConfig, sorobanServer, stellarPaymentAssets } from './lib/soroban'
-import { authenticateWallet, clearWalletSession, createPost, recordPostTip, fetchPosts, loadSocialState, fetchNftSocial, fetchNftChainActivity, toggleBookmarkRemote, markNotificationRead, markAllNotificationsRead, fetchNotifications, fetchBrowserPushConfig, saveBrowserPushSubscription, removeBrowserPushSubscription, sendBrowserPushTest, fetchReferralSummary, respondToMarketplaceOffer, postCommentRemote, postToPost, toggleCollectionLike, toggleCollectionDislike, commentOnCollection, fetchCollectionSocial, toggleCreatorFollow, toggleDislikeRemote, toggleLikeRemote, togglePostDislike, togglePostLike, toggleSubscriptionRemote, fetchOwnedNfts, fetchOwnedMintedNfts, fetchAccount, updateProfile, createCollection, updateCollectionProfile, registerNftContract, recordMintedNft, getPendingMintRecords, flushPendingMints, fetchMintedNfts, fetchMarketplaceState, fetchActiveMarketplaceListings, fetchActiveMarketplaceAuctions, fetchActiveMarketplaceCollectionOffers, fetchActiveMarketplaceTraitOffers, fetchCollectionDrop, fetchMintEligibility, createMintStage, updateMintStageMetadata, publishMintStage, deleteMintStage, addWhitelistEntries, removeWhitelistEntry, updateCollectionReveal, fetchCollectionRevealMetadata, fetchPublicCollections, fetchCollectionMintHistory, fetchCreatorProfiles, fetchPublicCreatorProfile, fetchCollectionStories, createCollectionStory, createCreatorStory, markStoryViewed, fetchCollectionDropDraft, saveCollectionDropDraft, clearCollectionDropDraft, fetchCollectionDropResetPlan, fetchAnalyticsOverview, fetchOpsHealth, fetchOpsReconciliation, runOpsReconciliation, createTrackedShareUrl, fetchPublicFeedback, submitPublicFeedback, type PublicFeedbackEntry, type AnalyticsSnapshot, type CollectionDropDraft, type CollectionDropDraftStage, type MarketplaceOffer, type MarketplaceAuction, type MarketplaceCollectionOffer, type MarketplaceTraitOffer, type CollectionStoryGroup, type NotificationRecord, type PostRecord, type SocialComment, type CollectionSocialRecord, type UserAccount, type WalletCollection, type MintedNft, type MintRecordInput, type MarketplaceState, type MarketplaceListing, type MintEligibility, type MintEligibilityStage, type CollectionDrop, type MintStage, type PublicCreatorProfile, type CollectionMintHistoryEntry, type NftChainActivityEntry } from './lib/backend'
+import { authenticateWallet, clearWalletSession, restoreWalletSession, createPost, recordPostTip, fetchPosts, loadSocialState, fetchNftSocial, fetchNftChainActivity, toggleBookmarkRemote, markNotificationRead, markAllNotificationsRead, fetchNotifications, fetchBrowserPushConfig, saveBrowserPushSubscription, removeBrowserPushSubscription, fetchReferralSummary, respondToMarketplaceOffer, postCommentRemote, postToPost, toggleCollectionLike, toggleCollectionDislike, commentOnCollection, fetchCollectionSocial, toggleCreatorFollow, toggleDislikeRemote, toggleLikeRemote, togglePostDislike, togglePostLike, toggleSubscriptionRemote, fetchOwnedNfts, fetchOwnedMintedNfts, fetchAccount, fetchAccountTradingActivity, fetchAdminAnalytics, fetchAdminUsers, fetchAdminVerificationApplications, reviewVerificationApplication, fetchVerificationApplication, submitVerificationApplication, updateProfile, createCollection, updateCollectionProfile, registerNftContract, recordMintedNft, getPendingMintRecords, flushPendingMints, fetchMintedNfts, fetchMarketplaceState, fetchActiveMarketplaceListings, fetchActiveMarketplaceAuctions, fetchActiveMarketplaceCollectionOffers, fetchActiveMarketplaceTraitOffers, fetchCollectionDrop, fetchMintEligibility, createMintStage, updateMintStageMetadata, publishMintStage, deleteMintStage, addWhitelistEntries, removeWhitelistEntry, updateCollectionReveal, fetchCollectionRevealMetadata, fetchPublicCollections, fetchCollectionMintHistory, fetchCreatorProfiles, fetchPublicCreatorProfile, fetchCollectionStories, createCollectionStory, createCreatorStory, markStoryViewed, fetchCollectionDropDraft, saveCollectionDropDraft, clearCollectionDropDraft, fetchCollectionDropResetPlan, fetchAnalyticsOverview, fetchOpsHealth, fetchOpsReconciliation, runOpsReconciliation, createTrackedShareUrl, fetchPublicFeedback, submitPublicFeedback, type PublicFeedbackEntry, type AnalyticsSnapshot, type AdminDashboardSnapshot, type AdminUser, type VerificationApplication, type VerificationApplicationState, type AccountTradingSnapshot, type CollectionDropDraft, type CollectionDropDraftStage, type MarketplaceOffer, type MarketplaceAuction, type MarketplaceCollectionOffer, type MarketplaceTraitOffer, type CollectionStoryGroup, type NotificationRecord, type PostRecord, type SocialComment, type CollectionSocialRecord, type UserAccount, type WalletCollection, type MintedNft, type MintRecordInput, type MarketplaceState, type MarketplaceListing, type MintEligibility, type MintEligibilityStage, type CollectionDrop, type MintStage, type PublicCreatorProfile, type CollectionMintHistoryEntry, type NftChainActivityEntry } from './lib/backend'
 import { trackProductEvent } from './lib/product-analytics'
-import { MediaAdmin } from './admin-media'
+const MediaAdmin = lazy(() => import('./admin-media').then((module) => ({ default: module.MediaAdmin })))
 import { useStellarAuth } from './lib/privy-auth'
 import { uploadCreatorMetadata, uploadMedia } from './lib/media'
 import { fetchNftProvenance, type NftProvenanceRecord } from './lib/backend'
 import { authHeaders } from './lib/backend'
-import { AiStudioPage, PixelStudioPage, type StudioMintInput } from './create-studio'
-import { AiCollectionStudioPage, getRarityTierSchedule, getRarityTierCounts, seededShuffle, type RarityTier, type TransferAsset } from './ai-collection-studio'
+import type { StudioMintInput } from './create-studio'
+import type { RarityTier, TransferAsset } from './ai-collection-studio'
 import { deleteStudioDraft, loadStudioDraft, saveStudioDraft } from './lib/studio-drafts'
-import { PainterStudioPage } from './painter-studio'
+const AiStudioPage = lazy(() => import('./create-studio').then((module) => ({ default: module.AiStudioPage })))
+const PixelStudioPage = lazy(() => import('./create-studio').then((module) => ({ default: module.PixelStudioPage })))
+const AiCollectionStudioPage = lazy(() => import('./ai-collection-studio').then((module) => ({ default: module.AiCollectionStudioPage })))
+const PainterStudioPage = lazy(() => import('./painter-studio').then((module) => ({ default: module.PainterStudioPage })))
 const CollagePosterStudioPage = lazy(() => import('./collage-poster-studio').then((module) => ({ default: module.CollagePosterStudioPage })))
 import { openCurrentPageInBrowser, telegramWebApp } from './lib/telegram-mini-app'
-import { CreatorServicesPage, ExhibitionsPage, PhysicalArtPage } from './creator-economy'
+const CreatorServicesPage = lazy(() => import('./creator-economy').then((module) => ({ default: module.CreatorServicesPage })))
+const ExhibitionsPage = lazy(() => import('./creator-economy').then((module) => ({ default: module.ExhibitionsPage })))
+const PhysicalArtPage = lazy(() => import('./creator-economy').then((module) => ({ default: module.PhysicalArtPage })))
 
-type View = 'home' | 'explore' | 'collections' | 'saved' | 'account' | 'analytics' | 'settings' | 'feedback' | 'services' | 'physical-art' | 'exhibitions' | 'pixel-studio' | 'ai-studio' | 'ai-collection-studio' | 'painter-studio' | 'collage-studio'
+type View = 'home' | 'explore' | 'collections' | 'saved' | 'account' | 'analytics' | 'admin' | 'settings' | 'feedback' | 'services' | 'physical-art' | 'exhibitions' | 'pixel-studio' | 'ai-studio' | 'ai-collection-studio' | 'painter-studio' | 'collage-studio'
 type Detail = { type: 'nft'; item: NFT } | { type: 'creator'; id: string } | { type: 'collection'; item: Collection }
 
 const marketTabs = ['All NFTs', 'Buy now', 'Auctions', 'Offers'] as const
 type MarketTab = typeof marketTabs[number]
 type WalletMode = 'buy' | 'offer' | 'sell' | 'auction' | 'bid'
 type WalletActionStatus = 'idle' | 'preparing' | 'awaiting-wallet' | 'confirming' | 'complete' | 'error'
+type LastAuthMethod = 'email' | 'Freighter' | 'MetaMask'
 type FeedPreferences = { creatorPosts: boolean; collectibles: boolean }
 type OpenPopover = 'notifications' | 'mobile-menu' | 'studios' | 'creative' | 'profile' | null
 
@@ -89,6 +95,7 @@ function routeFromPath(path: string): { view: View; detail: Detail | null } {
   if (cleanPath === '/saved') return { view: 'saved', detail: null }
   if (cleanPath === '/account') return { view: 'account', detail: null }
   if (cleanPath === '/analytics') return { view: 'analytics', detail: null }
+  if (cleanPath === '/admin') return { view: 'admin', detail: null }
   if (cleanPath === '/settings') return { view: 'settings', detail: null }
   if (cleanPath === '/feedback') return { view: 'feedback', detail: null }
   if (cleanPath === '/create/pixel') return { view: 'pixel-studio', detail: null }
@@ -207,7 +214,17 @@ function App() {
   const [walletOverviewOpen, setWalletOverviewOpen] = useState(false)
   const [walletActionStatus, setWalletActionStatus] = useState<WalletActionStatus>('idle')
   const [walletActionError, setWalletActionError] = useState('')
-  const [stellarWallet, setStellarWallet] = useState<StellarWallet | null>(null)
+  const [stellarWallet, setStellarWallet] = useState<StellarWallet | null>(() => restoreWalletSession())
+  const [lastAuthMethod, setLastAuthMethod] = useState<LastAuthMethod | null>(() => {
+    try {
+      const stored = window.localStorage.getItem('stellanova:last-auth-method')
+      return stored === 'email' || stored === 'Freighter' || stored === 'MetaMask' ? stored : null
+    } catch { return null }
+  })
+  const rememberLastAuthMethod = useCallback((method: LastAuthMethod) => {
+    setLastAuthMethod(method)
+    try { window.localStorage.setItem('stellanova:last-auth-method', method) } catch { /* storage is optional */ }
+  }, [])
   const [walletItem, setWalletItem] = useState<NFT | null>(null)
   const [walletAuction, setWalletAuction] = useState<MarketplaceAuction | null>(null)
   const [toast, setToast] = useState('')
@@ -238,7 +255,6 @@ function App() {
   const notificationsOpen = openPopover === 'notifications'
   const [browserPushState, setBrowserPushState] = useState<'unsupported' | 'off' | 'on' | 'denied'>(() => !('serviceWorker' in navigator) || !('PushManager' in window) || !('Notification' in window) ? 'unsupported' : Notification.permission === 'denied' ? 'denied' : 'off')
   const [browserPushBusy, setBrowserPushBusy] = useState(false)
-  const [browserPushTestBusy, setBrowserPushTestBusy] = useState(false)
   const navMenuOpen = openPopover === 'mobile-menu'
   const studioNavOpen = openPopover === 'studios'
   const creativeNavOpen = openPopover === 'creative'
@@ -637,28 +653,29 @@ function App() {
     // Dynamic share pages already arrive with server-rendered metadata. Keep
     // their item-specific title/description while React loads their data.
     if (!detail && (pathname.startsWith('/collection/') || pathname.startsWith('/nft/') || pathname.startsWith('/post/'))) return
-    let title = 'StellaNova — Social marketplace for digital art'
+    let title = 'NovaMarket — Social marketplace for digital art'
     let description = 'Discover digital art, follow creators, and collect NFTs on Stellar.'
     if (detail?.type === 'nft') {
-      title = `${detail.item.title} · StellaNova`
-      description = `View ${detail.item.title} on StellaNova.`
+      title = `${detail.item.title} · NovaMarket`
+      description = `View ${detail.item.title} on NovaMarket.`
     } else if (detail?.type === 'collection') {
-      title = `${detail.item.name} · StellaNova`
-      description = detail.item.description?.trim() || `Explore ${detail.item.name} on StellaNova.`
+      title = `${detail.item.name} · NovaMarket`
+      description = detail.item.description?.trim() || `Explore ${detail.item.name} on NovaMarket.`
     } else if (detail?.type === 'creator') {
       const creator = creators.find((item) => item.id === detail.id)
-      title = `${creator?.name || 'Creator'} · StellaNova`
-      description = creator?.bio?.trim() || `Explore artwork and collections from ${creator?.name || 'this creator'} on StellaNova.`
+      title = `${creator?.name || 'Creator'} · NovaMarket`
+      description = creator?.bio?.trim() || `Explore artwork and collections from ${creator?.name || 'this creator'} on NovaMarket.`
     } else {
       const pageMetadata: Partial<Record<View, { title: string; description: string }>> = {
-        home: { title: 'StellaNova — Social marketplace for digital art', description },
-        explore: { title: 'Explore digital art · StellaNova', description: 'Browse digital artwork and NFTs shared by creators on StellaNova.' },
-        services: { title: 'Hire a creator · StellaNova', description: 'Find artists for commissions and creative projects, agree terms, and pay in XLM.' },
-        'physical-art': { title: 'Original physical art · StellaNova', description: 'Discover and buy original tangible artworks from creators using XLM.' },
-        exhibitions: { title: 'Real-world art exhibitions · StellaNova', description: 'Discover in-person exhibitions and art events organized by StellaNova creators.' },
-        collections: { title: 'NFT collections · StellaNova', description: 'Discover creator collections and live drops on StellaNova.' },
-        analytics: { title: 'Marketplace analytics · StellaNova', description: 'Explore verified Stellar marketplace activity on StellaNova.' },
-        feedback: { title: 'Community feedback · StellaNova', description: 'Share ideas, report problems, and follow feedback from the StellaNova community.' },
+        home: { title: 'NovaMarket — Social marketplace for digital art', description },
+        explore: { title: 'Explore digital art · NovaMarket', description: 'Browse digital artwork and NFTs shared by creators on NovaMarket.' },
+        services: { title: 'Hire a creator · NovaMarket', description: 'Find artists for commissions and creative projects, agree terms, and pay in XLM.' },
+        'physical-art': { title: 'Original physical art · NovaMarket', description: 'Discover and buy original tangible artworks from creators using XLM.' },
+        exhibitions: { title: 'Real-world art exhibitions · NovaMarket', description: 'Discover in-person exhibitions and art events organized by NovaMarket creators.' },
+        collections: { title: 'NFT collections · NovaMarket', description: 'Discover creator collections and live drops on NovaMarket.' },
+        analytics: { title: 'Marketplace analytics · NovaMarket', description: 'Explore verified Stellar marketplace activity on NovaMarket.' },
+        admin: { title: 'Admin dashboard · NovaMarket', description: 'Manage NovaMarket collection reviews and user verification.' },
+        feedback: { title: 'Community feedback · NovaMarket', description: 'Share ideas, report problems, and follow feedback from the NovaMarket community.' },
       }
       const page = pageMetadata[view]
       if (page) ({ title, description } = page)
@@ -715,6 +732,7 @@ function App() {
 
   useEffect(() => {
     if (!privyAuth.wallet) return
+    if (privyAuth.wallet.provider === 'Privy') rememberLastAuthMethod('email')
     setStellarWallet(privyAuth.wallet)
     if (!walletItem) setWalletOpen(false)
     notify(`Your Stellar wallet is ready: ${shortenStellarAddress(privyAuth.wallet.address)}`)
@@ -722,7 +740,7 @@ function App() {
       setAccount(data.account)
       setWalletCollections(data.collections)
     }).catch(() => {})
-  }, [privyAuth.wallet])
+  }, [privyAuth.wallet, rememberLastAuthMethod])
 
   useEffect(() => {
     if (!privyAuth.wallet && privyAuth.error && stellarWallet?.provider === 'Privy') setStellarWallet(null)
@@ -756,14 +774,14 @@ function App() {
 
   const handleBrowserPushToggle = async () => {
     if (browserPushBusy) return
-    if (!stellarWallet) { notify('Connect your wallet to enable browser alerts'); return }
+    if (!stellarWallet) { openWallet(); return }
     setBrowserPushBusy(true)
     try {
       if (browserPushState !== 'on') {
         const permission = await Notification.requestPermission()
         if (permission !== 'granted') {
           setBrowserPushState(permission === 'denied' ? 'denied' : 'off')
-          if (permission === 'denied') notify('Allow notifications for StellaNova in your browser settings to turn on alerts')
+          if (permission === 'denied') notify('Allow notifications for NovaMarket in your browser settings to turn on alerts')
           return
         }
       }
@@ -789,19 +807,6 @@ function App() {
       notify(error instanceof Error ? error.message : 'Could not update browser alerts')
     } finally {
       setBrowserPushBusy(false)
-    }
-  }
-
-  const handleBrowserPushTest = async () => {
-    if (!stellarWallet || browserPushTestBusy) return
-    setBrowserPushTestBusy(true)
-    try {
-      const result = await sendBrowserPushTest(stellarWallet.address)
-      notify(result.failed ? `Push service accepted ${result.sent} alert(s); ${result.failed} delivery failed.` : `Push service accepted the test for ${result.sent} device(s). Check this phone’s notification shade.`)
-    } catch (error) {
-      notify(error instanceof Error ? error.message : 'Could not send a test browser alert')
-    } finally {
-      setBrowserPushTestBusy(false)
     }
   }
 
@@ -856,7 +861,7 @@ function App() {
   }
 
   const toggleSaved = (id: string) => {
-    if (!stellarWallet) { notify('Connect your Stellar wallet to save this NFT across devices'); return }
+    if (!stellarWallet) { openWallet(); return }
     const wasSaved = saved.includes(id)
     setSaved((current) => wasSaved ? current.filter((item) => item !== id) : [...current, id])
     void toggleBookmarkRemote(stellarWallet.address, id).then(({ saved: nowSaved }) => {
@@ -938,7 +943,7 @@ function App() {
     return marketNfts.filter((item) => item.tokenId !== undefined && item.contractId && ownedTokens.some((token) => token.token_id === item.tokenId && token.contract_id.toLowerCase() === item.contractId?.toLowerCase()))
   }, [ownedTokens, ownershipSource, stellarWallet, marketNfts])
   const toggleLike = (id: string) => {
-    if (!stellarWallet) { notify('Connect your Stellar wallet to like NFTs'); return }
+    if (!stellarWallet) { openWallet(); return }
     const wasLiked = liked.includes(id)
     const wasDisliked = disliked.includes(id)
     setLiked((current) => wasLiked ? current.filter((item) => item !== id) : [...current, id])
@@ -955,7 +960,7 @@ function App() {
     })
   }
   const toggleDislike = (id: string) => {
-    if (!stellarWallet) { notify('Connect your Stellar wallet to react to NFTs'); return }
+    if (!stellarWallet) { openWallet(); return }
     const wasDisliked = disliked.includes(id)
     setDisliked((current) => wasDisliked ? current.filter((item) => item !== id) : [...current, id])
     const wasLiked = liked.includes(id)
@@ -976,6 +981,7 @@ function App() {
     toggleLike(id)
   }
   const toggleSubscription = (collection: Collection) => {
+    if (!stellarWallet) { openWallet(); return }
     const following = subscribedCollections.includes(collection.id)
     setSubscribedCollections((current) => following ? current.filter((id) => id !== collection.id) : [...current, collection.id])
     if (stellarWallet) void toggleSubscriptionRemote(stellarWallet.address, collection.id).catch(() => notify('Follow saved locally; server sync is unavailable'))
@@ -991,7 +997,7 @@ function App() {
   const addComment = async (itemId: string, text: string, parentId: number | string | null = null) => {
     const value = text.trim()
     if (!value) return
-    if (!stellarWallet) { notify('Connect your Stellar wallet to comment'); return }
+    if (!stellarWallet) { openWallet(); return }
     const temporaryId = `local-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`
     setComments((current) => ({ ...current, [itemId]: [...(current[itemId] ?? []), { id: temporaryId, wallet_address: stellarWallet?.address ?? 'Collector', body: value, parent_id: parentId, created_at: new Date().toISOString() }] }))
     {
@@ -1016,7 +1022,7 @@ function App() {
   }
 
   const handlePostLike = (postId: number) => {
-    if (!stellarWallet) { notify('Connect your Stellar wallet to like posts'); return }
+    if (!stellarWallet) { openWallet(); return }
     const wasLiked = posts.find((post) => post.id === postId)?.liked ?? false
     setPosts((current) => current.map((post) => post.id === postId ? { ...post, liked: !post.liked, likes: post.likes + (post.liked ? -1 : 1) } : post))
     if (postId > 0) void togglePostLike(stellarWallet.address, postId).catch(() => {
@@ -1031,7 +1037,7 @@ function App() {
     handlePostLike(postId)
   }
   const handlePostDislike = (postId: number) => {
-    if (!stellarWallet) { notify('Connect your Stellar wallet to react to posts'); return }
+    if (!stellarWallet) { openWallet(); return }
     const key = `post:${postId}`
     const wasDisliked = disliked.includes(key)
     const postBefore = posts.find((item) => item.id === postId)
@@ -1057,7 +1063,7 @@ function App() {
   const handlePostComment = async (postId: number, text: string, parentId: number | string | null = null) => {
     const value = text.trim()
     if (!value) return
-    if (!stellarWallet) { notify('Connect your Stellar wallet to comment'); return }
+    if (!stellarWallet) { openWallet(); return }
     const temporaryId = `local-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`
     setPosts((current) => current.map((post) => post.id === postId ? { ...post, comments: [...(post.comments ?? []), { id: temporaryId, wallet_address: stellarWallet?.address ?? 'Collector', body: value, parent_id: parentId, created_at: new Date().toISOString() }] } : post))
     if (postId > 0) {
@@ -1094,7 +1100,7 @@ function App() {
   }
 
   const handleCollectionReaction = async (collectionId: string, reaction: 'like' | 'dislike') => {
-    if (!stellarWallet) { notify(`Connect your Stellar wallet to ${reaction} collections`); openWallet(); return }
+    if (!stellarWallet) { openWallet(); return }
     try {
       if (reaction === 'like') await toggleCollectionLike(stellarWallet.address, collectionId)
       else await toggleCollectionDislike(stellarWallet.address, collectionId)
@@ -1106,7 +1112,7 @@ function App() {
   const handleCollectionComment = async (collectionId: string, text: string, parentId: number | string | null = null) => {
     const body = text.trim()
     if (!body) return
-    if (!stellarWallet) { notify('Connect your Stellar wallet to comment'); openWallet(); return }
+    if (!stellarWallet) { openWallet(); return }
     try {
       const serverParent = parentId !== null && /^\d+$/.test(String(parentId)) ? Number(parentId) : null
       await commentOnCollection(stellarWallet.address, collectionId, body, serverParent)
@@ -1117,6 +1123,7 @@ function App() {
 
 
   const handleCreatorFollow = (creatorId: string) => {
+    if (!stellarWallet) { openWallet(); return }
     const following = creatorFollows.includes(creatorId)
     setCreatorFollows((current) => following ? current.filter((id) => id !== creatorId) : [...current, creatorId])
     const creator = creatorFor(creatorId, creatorProfiles)
@@ -1126,7 +1133,7 @@ function App() {
   }
 
   const savePublicProfile = async (input: { displayName: string; creatorUsername: string; bio: string; avatar: string; avatarFile: File | null }) => {
-    if (!stellarWallet) throw new Error('Connect a wallet before editing your profile.')
+    if (!stellarWallet) { openWallet(); return }
     let avatar = input.avatar
     if (input.avatarFile) {
       const uploaded = await uploadMedia(input.avatarFile, 'profile', { walletAddress: stellarWallet.address })
@@ -1157,7 +1164,7 @@ function App() {
   }
 
   const handleCreatePost = async () => {
-    if (!stellarWallet) { notify('Connect your Stellar wallet to post'); return }
+    if (!stellarWallet) { openWallet(); return }
     const linkedNft = ownedItems.find((item) => item.id === composeNft)
     if (!linkedNft && !composeFile && !composeText.trim()) { notify('Add artwork or a caption before sharing'); return }
     setPosting(true)
@@ -1182,7 +1189,7 @@ function App() {
   }
 
   const handleCreateCollectionPost = async (collection: Collection, caption: string, mediaUrl: string) => {
-    if (!stellarWallet) { notify('Sign in to post as this collection'); return }
+    if (!stellarWallet) { openWallet(); return }
     if (!caption.trim() && !mediaUrl.trim()) { notify('Add a caption or media to post'); return }
     try {
       const { id } = await createPost(stellarWallet.address, { caption: caption.trim(), mediaUrl: mediaUrl.trim(), collectionId: collection.id })
@@ -1195,7 +1202,7 @@ function App() {
   }
 
   const handleCreateCollectionStory = async (collection: Collection, caption: string, mediaUrl: string) => {
-    if (!stellarWallet) throw new Error('Sign in to publish a collection story')
+    if (!stellarWallet) { openWallet(); return }
     try {
       const video = /\.(mp4|webm|mov)(\?.*)?$/i.test(mediaUrl.trim())
       await createCollectionStory(stellarWallet.address, collection.id, { caption: caption.trim(), mediaUrl: mediaUrl.trim(), mediaType: video ? 'video' : 'image' })
@@ -1209,7 +1216,7 @@ function App() {
   }
 
   const handleCreateCreatorStory = async (caption: string, mediaUrl: string, mediaType: 'image' | 'video') => {
-    if (!stellarWallet) throw new Error('Sign in to publish your status')
+    if (!stellarWallet) { openWallet(); return }
     await createCreatorStory(stellarWallet.address, { caption: caption.trim(), mediaUrl: mediaUrl.trim(), mediaType })
     const { groups } = await fetchCollectionStories(stellarWallet.address)
     setStoryGroups(groups)
@@ -1233,6 +1240,7 @@ function App() {
     try {
       const wallet = await connectFreighter()
       await authenticateWallet(wallet)
+      rememberLastAuthMethod('Freighter')
       setStellarWallet(wallet)
       if (!walletItem) setWalletOpen(false)
       notify(`${shortenStellarAddress(wallet.address)} signed in on ${wallet.network === 'PUBLIC' ? 'Stellar Mainnet' : 'Stellar Testnet'}`)
@@ -1246,9 +1254,28 @@ function App() {
     }
   }
 
+  const handleConnectMetaMask = async () => {
+    try {
+      const wallet = await connectMetaMaskStellar()
+      await authenticateWallet(wallet)
+      rememberLastAuthMethod('MetaMask')
+      setStellarWallet(wallet)
+      if (!walletItem) setWalletOpen(false)
+      notify(`${shortenStellarAddress(wallet.address)} signed in on Stellar Mainnet`)
+      try {
+        const data = await fetchAccount(wallet.address)
+        setAccount(data.account)
+        setWalletCollections(data.collections)
+      } catch { /* account read is best-effort */ }
+    } catch (error) {
+      notify(error instanceof Error ? error.message : 'Unable to connect MetaMask to Stellar')
+    }
+  }
+
   const handleDisconnectWallet = async () => {
     if (stellarWallet) await clearWalletSession(stellarWallet.address)
     if (stellarWallet?.provider === 'Privy') await privyAuth.logout()
+    if (stellarWallet?.provider === 'MetaMask') await disconnectMetaMaskStellar().catch(() => undefined)
     setStellarWallet(null)
     setAccount(null)
     setWalletCollections([])
@@ -1258,6 +1285,7 @@ function App() {
 
   const openCollectionCreation = () => {
     if (collectionCreating) return
+    if (!stellarWallet) { openWallet(); return }
     setOnboardName('')
     setOnboardSymbol('')
     setOnboardDesc('')
@@ -1278,7 +1306,7 @@ function App() {
 
   const handleCreateMyCollection = async () => {
     if (collectionCreating) return
-    if (!stellarWallet) { notify('Connect your Stellar wallet first'); return }
+    if (!stellarWallet) { openWallet(); return }
     if (!onboardName.trim() || !onboardSymbol.trim()) { notify('Enter a collection name and symbol'); return }
     if (!onboardCover) { notify('Choose a display image for your collection'); return }
     const totalSupply = onboardSupply.trim() ? Number(onboardSupply) : null
@@ -1362,7 +1390,7 @@ function App() {
   }
 
   const createAiStudioCollection = async (input: { name: string; symbol: string; description: string; totalSupply: number; cover: File }) => {
-    if (!stellarWallet) throw new Error('Connect your Stellar wallet before creating a collection')
+    if (!stellarWallet) { openWallet(); throw new Error('Sign in to create a collection.') }
     const contractId = getSorobanNftContractId()
     await registerNftContract(stellarWallet.address, contractId)
     const symbol = input.symbol.trim().toUpperCase()
@@ -1397,7 +1425,7 @@ function App() {
   }
 
   const saveAiStudioArtwork = async (slug: string, assets: TransferAsset[], rarityMix: { high: number; medium: number; common: number }, onProgress: (message: string) => void) => {
-    if (!stellarWallet) throw new Error('Connect your creator wallet to save collection artwork')
+    if (!stellarWallet) { openWallet(); throw new Error('Sign in to save collection artwork.') }
     if (!assets.length) throw new Error('Select at least one generated artwork')
     const artwork: CollectionDropDraft['artwork'] = []
     for (const [index, asset] of assets.entries()) {
@@ -1426,7 +1454,7 @@ function App() {
   // in the read model and map it into a collection so it can be listed/resold.
   const handleMintNft = async (draft?: StudioMintInput, collectionSlugOverride?: string) => {
     if (minting) return
-    if (!stellarWallet) { notify('Connect your Stellar wallet to mint'); return }
+    if (!stellarWallet) { openWallet(); return }
     const title = typeof draft?.title === 'string' ? draft.title.trim() : mintTitle.trim()
     const description = typeof draft?.description === 'string' ? draft.description : mintDescription
     const artworkFile = draft?.artwork ?? mintFile
@@ -1504,7 +1532,7 @@ function App() {
   }
 
   const generateAiArtwork = async (prompt: string, transparent = false) => {
-    if (!stellarWallet) throw new Error('Connect your wallet before generating artwork.')
+    if (!stellarWallet) { openWallet(); throw new Error('Sign in to generate artwork.') }
     trackProductEvent('artwork_generation_started', { studio: 'ai-art' })
     try {
     const response = await fetch('/api/ai/generate-image', {
@@ -1526,7 +1554,7 @@ function App() {
   }
 
   const analyzeAiArtwork = async (file: File) => {
-    if (!stellarWallet) throw new Error('Connect your wallet before analyzing artwork.')
+    if (!stellarWallet) { openWallet(); throw new Error('Sign in to analyze artwork.') }
     const form = new FormData()
     form.append('image', file, file.name)
     const response = await fetch('/api/ai/analyze-image', {
@@ -1540,7 +1568,7 @@ function App() {
   }
 
   const verifyAiArtworkTraits = async (file: File, expectedAttributes: { trait_type: string; value: string }[]) => {
-    if (!stellarWallet) throw new Error('Connect your wallet before checking artwork traits.')
+    if (!stellarWallet) { openWallet(); throw new Error('Sign in to check artwork traits.') }
     const form = new FormData()
     form.append('image', file, file.name)
     form.append('expectedAttributes', JSON.stringify(expectedAttributes))
@@ -1555,7 +1583,7 @@ function App() {
   }
 
   const planAiCollectionTraits = async (prompt: string, count: number) => {
-    if (!stellarWallet) throw new Error('Connect your wallet before planning collection traits.')
+    if (!stellarWallet) { openWallet(); throw new Error('Sign in to plan collection traits.') }
     const response = await fetch('/api/ai/plan-collection-traits', {
       method: 'POST',
       headers: { 'content-type': 'application/json', ...authHeaders(stellarWallet.address) },
@@ -1575,7 +1603,7 @@ function App() {
   }
 
   const handleCancelListing = async (listingId: number, contractId = sorobanMarketplaceConfig.marketplaceContractId) => {
-    if (!stellarWallet) { notify('Connect your wallet to manage listings'); return }
+    if (!stellarWallet) { openWallet(); return }
     if (!contractId) { notify('The marketplace contract is not configured'); return }
     try {
       const listing = [...activeListings, ...(marketplace?.listings ?? [])].find((entry) => entry.listing_id === listingId && entry.contract_id?.toLowerCase() === contractId.toLowerCase())
@@ -1591,7 +1619,8 @@ function App() {
   }
 
   const handleCancelAuction = async (auctionId: number) => {
-    if (!stellarWallet || !sorobanMarketplaceConfig.marketplaceContractId) return notify('Connect your wallet to manage this auction')
+    if (!stellarWallet) { openWallet(); return }
+    if (!sorobanMarketplaceConfig.marketplaceContractId) return notify('The marketplace contract is not configured')
     try {
       await invokeSoroban(sorobanMarketplaceConfig.marketplaceContractId, 'cancel_auction', [StellarSdk.nativeToScVal(auctionId, { type: 'u32' })], stellarWallet)
       setActiveAuctions((items) => items.filter((auction) => auction.auction_id !== auctionId))
@@ -1600,7 +1629,8 @@ function App() {
   }
 
   const handleSettleAuction = async (auctionId: number) => {
-    if (!stellarWallet || !sorobanMarketplaceConfig.marketplaceContractId) return notify('Connect a wallet to settle this auction')
+    if (!stellarWallet) { openWallet(); return }
+    if (!sorobanMarketplaceConfig.marketplaceContractId) return notify('The marketplace contract is not configured')
     try {
       await invokeSoroban(sorobanMarketplaceConfig.marketplaceContractId, 'settle_auction', [StellarSdk.nativeToScVal(auctionId, { type: 'u32' })], stellarWallet)
       setActiveAuctions((items) => items.filter((auction) => auction.auction_id !== auctionId))
@@ -1610,7 +1640,7 @@ function App() {
   }
 
   const handleCancelOffer = async (offerId: number, contractId = sorobanMarketplaceConfig.marketplaceContractId) => {
-    if (!stellarWallet) { notify('Connect your wallet to manage offers'); return }
+    if (!stellarWallet) { openWallet(); return }
     if (!contractId) { notify('The marketplace contract is not configured'); return }
     try {
       const offer = marketplace?.offers.find((entry) => entry.offer_id === offerId && entry.contract_id?.toLowerCase() === contractId.toLowerCase())
@@ -1626,7 +1656,7 @@ function App() {
   }
 
   const handleAcceptOffer = async (offerId: number, contractId = sorobanMarketplaceConfig.marketplaceContractId) => {
-    if (!stellarWallet) { notify('Connect your wallet to accept offers'); return }
+    if (!stellarWallet) { openWallet(); return }
     if (!contractId) { notify('The marketplace contract is not configured'); return }
     try {
       await invokeSoroban(contractId, 'accept_offer', [
@@ -1653,7 +1683,7 @@ function App() {
   }
 
   const handleRejectOffer = async (offerId: number, contractId = sorobanMarketplaceConfig.marketplaceContractId) => {
-    if (!stellarWallet) return notify('Connect your wallet to reject received offers')
+    if (!stellarWallet) { openWallet(); return }
     if (!contractId) return notify('The marketplace contract is not configured')
     try {
       const offer = marketplace?.incomingOffers.find((entry) => entry.offer_id === offerId && entry.contract_id?.toLowerCase() === contractId.toLowerCase())
@@ -1669,7 +1699,7 @@ function App() {
   }
 
   const handleCounterOffer = async (offerId: number, amount: string, contractId = sorobanMarketplaceConfig.marketplaceContractId) => {
-    if (!stellarWallet) { notify('Connect your wallet to counter offers'); return false }
+    if (!stellarWallet) { openWallet(); return false }
     try {
       await respondToMarketplaceOffer(stellarWallet.address, offerId, 'counter', amount, contractId)
       notify(`Counter-offer sent for offer #${offerId}`)
@@ -1679,7 +1709,7 @@ function App() {
   }
 
   const handleCounterResponse = async (offer: MarketplaceOffer, accept: boolean) => {
-    if (!stellarWallet) return notify('Connect your wallet to respond to counter-offers')
+    if (!stellarWallet) { openWallet(); return }
     const contractId = offer.contract_id ?? sorobanMarketplaceConfig.marketplaceContractId
     if (!accept) {
       try {
@@ -1949,7 +1979,6 @@ function App() {
 
   const startCreatorStudio = (studio: 'pixel-studio' | 'ai-studio') => {
     setCreateChooserOpen(false)
-    if (!stellarWallet) { openWallet(); return }
     setMintError('')
     setMintSuccess(null)
     navTo(studio)
@@ -1957,6 +1986,7 @@ function App() {
 
   const startPostFlow = () => {
     setCreateChooserOpen(false)
+    if (!stellarWallet) { openWallet(); return }
     navTo('home')
     setComposeOpen(true)
   }
@@ -1980,29 +2010,50 @@ function App() {
   const profilePostAvatar = posts.find((post) => post.author_type === 'user'
     && post.avatar
     && (post.is_me || profileNames.includes(post.author_name?.trim().toLocaleLowerCase() ?? '')))?.avatar
-  const profileAvatar = account?.avatar || profilePostAvatar || ''
+  const profileAvatarNft = account?.avatar
+    ? marketNfts.find((item) => item.image === account.avatar && item.contractId && item.tokenId !== undefined)
+    : undefined
+  const profileAvatarNftOwned = Boolean(profileAvatarNft && stellarWallet && (
+    ownedTokens.some((token) => token.contract_id.toLowerCase() === profileAvatarNft.contractId!.toLowerCase() && token.token_id === profileAvatarNft.tokenId)
+    || activeListings.some((listing) => listing.nft_contract.toLowerCase() === profileAvatarNft.contractId!.toLowerCase() && listing.token_id === profileAvatarNft.tokenId && listing.seller.toLowerCase() === stellarWallet.address.toLowerCase())
+    || activeAuctions.some((auction) => auction.nft_contract.toLowerCase() === profileAvatarNft.contractId!.toLowerCase() && auction.token_id === profileAvatarNft.tokenId && auction.seller.toLowerCase() === stellarWallet.address.toLowerCase())
+  ))
+  const profileAvatarNftWasSold = Boolean(profileAvatarNft && stellarWallet && ownershipSource === 'indexed' && !profileAvatarNftOwned)
+  const profileAvatar = profileAvatarNftWasSold ? '' : account?.avatar || profilePostAvatar || ''
+
+  useEffect(() => {
+    if (!profileAvatarNftWasSold || !stellarWallet || !account?.avatar) return
+    let active = true
+    void updateProfile(stellarWallet.address, { avatar: '' }).then(() => {
+      if (!active) return
+      const oldAvatar = account.avatar
+      const walletId = stellarWallet.address.toLowerCase()
+      setAccount((current) => current ? { ...current, avatar: '' } : current)
+      setCreatorProfiles((current) => current[walletId]
+        ? { ...current, [walletId]: { ...current[walletId], avatar: '' } }
+        : current)
+      setPosts((current) => current.map((post) =>
+        (post.creator_wallet ?? post.author).toLowerCase() === walletId && post.avatar === oldAvatar
+          ? { ...post, avatar: '' }
+          : post))
+    }).catch((error) => console.warn('Could not clear a profile NFT that is no longer owned', error))
+    return () => { active = false }
+  }, [profileAvatarNftWasSold, stellarWallet?.address, account?.avatar])
 
   if (window.location.pathname === '/admin/deploy') {
     return <DeploymentConsole wallet={stellarWallet} onConnect={handleConnectWallet} />
   }
   if (window.location.pathname === '/admin/media') {
-    return <MediaAdmin wallet={stellarWallet} />
+    return <Suspense fallback={<div className="studio-loading" role="status">Loading media tools…</div>}><MediaAdmin wallet={stellarWallet} /></Suspense>
   }
 
   if (!introComplete) return <LaunchSplash />
-  if (!stellarWallet && view !== 'analytics' && view !== 'feedback' && !detail) return <>
-    <WelcomeView collections={allCollections} emailSignIn={privyAuth.configured} onSignUp={() => openWallet()} onLogIn={() => openWallet()} onConnectFreighter={() => void handleConnectFreighter()} />
-    <InstallExperience />
-    {walletOpen && <WalletModal key={`${walletMode}-${walletItem?.id ?? 'connect'}`} item={walletItem} mode={walletMode} auction={walletAuction} wallet={stellarWallet} emailSignIn={privyAuth.configured} emailReady={privyAuth.ready} onClose={() => setWalletOpen(false)} onConnect={handleConnectWallet} onConnectFreighter={handleConnectFreighter} onPurchase={handleOnChainAction} actionStatus={walletActionStatus} actionError={walletActionError} />}
-    {toast && <Toast>{toast}</Toast>}
-  </>
-
   return (
     <CreatorProfilesContext.Provider value={creatorProfiles}>
     <NftCardActionsContext.Provider value={{ walletAddress: stellarWallet?.address ?? '', marketplace, activeListings, activeAuctions, latestLedger, buy: (item) => openWallet(item, 'buy'), offer: (item) => openWallet(item, 'offer'), sell: handleSell, auction: (item) => openWallet(item, 'auction'), bid: (item) => openWallet(item, 'bid'), cancelAuction: handleCancelAuction, settleAuction: handleSettleAuction, cancelListing: handleCancelListing, acceptOffer: handleAcceptOffer }}>
     <div className="app-shell">
       <aside className="desktop-rail">
-        <div className="rail-logo"><PrismMark /><span><b>Stella</b>Nova</span></div>
+        <div className="rail-logo" role="img" aria-label="NovaMarket"><PrismMark /></div>
         <div className="rail-divider" />
         <nav className="rail-nav" aria-label="Primary navigation">
           <NavItem icon="home" label="Feed" active={view === 'home' && !detail} onClick={() => navTo('home')} />
@@ -2019,22 +2070,22 @@ function App() {
           <NavItem icon="comment" label="Feedback" active={view === 'feedback' && !detail} onClick={() => navTo('feedback')} />
         </nav>
         <div className="rail-bottom">
-          {stellarWallet && <div className="profile-chip-wrap">
-            <button className="profile-chip" aria-label="Open profile menu" aria-expanded={profileNavOpen} data-popover-trigger onClick={() => togglePopover('profile')}><Avatar src={profileAvatar} alt={(account?.display_name || 'Your profile')} size="sm" /><span><b>{account?.display_name || shortenStellarAddress(stellarWallet.address)}{account?.is_verified ? <Verified /> : null}</b><small>{account?.is_creator ? 'Creator' : 'Collector'}{account?.is_creator ? ' ? creator' : ''}</small></span><Icon name="chevron" size={15} /></button>
-            {profileNavOpen && <div className="profile-menu" role="menu" aria-label="Profile navigation" data-popover-content>
-              {([['account', 'Profile'], ['saved', 'Saved'], ['settings', 'Settings']] as [View, string][]).map(([nextView, label]) => <button type="button" role="menuitem" key={nextView} className={view === nextView ? 'is-active' : ''} onClick={() => { navTo(nextView); setOpenPopover(null) }}>{label}{nextView === 'saved' && saved.length > 0 ? <small>{saved.length}</small> : null}</button>)}
+          <div className="profile-chip-wrap">
+            <button className="profile-chip" aria-label={stellarWallet ? 'Open profile menu' : 'Open your profile'} aria-expanded={profileNavOpen} data-popover-trigger onClick={() => stellarWallet ? togglePopover('profile') : navTo('account')}><Avatar src={profileAvatar} alt={(account?.display_name || 'Your profile')} size="sm" /><span><b>{stellarWallet ? account?.display_name || shortenStellarAddress(stellarWallet.address) : 'Your profile'}{account?.is_verified ? <Verified /> : null}</b><small>{stellarWallet ? account?.is_creator ? 'Creator' : 'Collector' : 'Sign in to personalize'}</small></span>{stellarWallet && <Icon name="chevron" size={15} />}</button>
+            {stellarWallet && profileNavOpen && <div className="profile-menu" role="menu" aria-label="Profile navigation" data-popover-content>
+              {([...([['account', 'Profile'], ['saved', 'Saved'], ['settings', 'Settings']] as [View, string][]), ...(account?.is_admin ? [['admin', 'Admin dashboard'] as [View, string]] : [])]).map(([nextView, label]) => <button type="button" role="menuitem" key={nextView} className={view === nextView ? 'is-active' : ''} onClick={() => { navTo(nextView); setOpenPopover(null) }}>{label}{nextView === 'saved' && saved.length > 0 ? <small>{saved.length}</small> : null}</button>)}
             </div>}
-            {!account?.is_creator && <button className="profile-create" onClick={openCollectionCreation}><Icon name="plus" size={14} /> Create a collection</button>}
-          </div>}
+            {stellarWallet && !account?.is_creator && <button className="profile-create" onClick={openCollectionCreation}><Icon name="plus" size={14} /> Create a collection</button>}
+          </div>
         </div>
       </aside>
 
       <main className="main-content">
         <header className="topbar">
           <button className="mobile-menu-button" aria-label="Open navigation" aria-expanded={navMenuOpen} data-popover-trigger onClick={() => togglePopover('mobile-menu')}><i /><i /><i /></button>
-          <button className="mobile-brand" onClick={() => navTo('home')}><PrismMark small /><span><b>Stella</b>Nova</span></button>
+          <button className="mobile-brand" aria-label="NovaMarket home" onClick={() => navTo('home')}><PrismMark small /></button>
           <div className="topbar__search"><Icon name="search" size={18} /><input aria-label="Search artworks, creators or collections" placeholder="Search art, creators, collections" value={search} onChange={(event) => handleSearch(event.target.value)} /><kbd>⌘ K</kbd></div>
-          <div className="topbar__actions"><button className="top-icon notification-bell" aria-label="Notifications" aria-expanded={notificationsOpen} data-popover-trigger onClick={() => togglePopover('notifications')}><Icon name="bell" size={20} />{unreadCount > 0 && <em>{unreadCount}</em>}</button><Button variant={stellarWallet ? 'outline' : 'primary'} className="wallet-button" aria-label={stellarWallet ? 'Open wallet balances and transactions' : 'Connect wallet'} onClick={() => stellarWallet ? setWalletOverviewOpen(true) : openWallet()}><Icon name="wallet" size={16} />{stellarWallet ? shortenStellarAddress(stellarWallet.address) : privyAuth.configured ? 'Sign up' : 'Connect Wallet'}</Button><button className={`mobile-profile ${stellarWallet && profileAvatar ? 'mobile-profile--image' : ''}`} aria-label={stellarWallet ? 'Open account' : 'Sign up with email'} onClick={() => stellarWallet ? navTo('account') : openWallet()}>{stellarWallet && profileAvatar ? <Avatar src={profileAvatar} alt="Your profile" size="sm" /> : <Icon name={stellarWallet ? 'user' : 'wallet'} size={17} />}</button></div>
+          <div className="topbar__actions"><button className="top-icon notification-bell" aria-label="Notifications" aria-expanded={notificationsOpen} data-popover-trigger onClick={() => stellarWallet ? togglePopover('notifications') : openWallet()}><Icon name="bell" size={20} />{unreadCount > 0 && <em>{unreadCount}</em>}</button><Button variant={stellarWallet ? 'outline' : 'primary'} className="wallet-button" aria-label={stellarWallet ? 'Open wallet balances and transactions' : 'Connect wallet'} onClick={() => stellarWallet ? setWalletOverviewOpen(true) : openWallet()}><Icon name="wallet" size={16} />{stellarWallet ? shortenStellarAddress(stellarWallet.address) : privyAuth.configured ? 'Sign up' : 'Connect Wallet'}</Button><button className="mobile-profile mobile-profile--image" aria-label="Open account" onClick={() => navTo('account')}><Avatar src={profileAvatar} alt="Your profile" size="sm" /></button></div>
         </header>
         {navMenuOpen && <nav className="mobile-menu-popover" aria-label="Navigation menu" data-popover-content>
           {([['home', 'Feed'], ['explore', 'Explore'], ['collections', 'Collections'], ['saved', 'Saved'], ['account', 'Account']] as [View, string][]).map(([nextView, label]) => <button key={nextView} className={view === nextView ? 'is-active' : ''} onClick={() => { navTo(nextView); setOpenPopover(null) }}>{label}{nextView === 'saved' && saved.length > 0 ? <small>{saved.length}</small> : null}</button>)}
@@ -2043,16 +2094,15 @@ function App() {
           <span className="mobile-menu-section-label">Creator studios</span>
           {([['pixel-studio', 'Pixel Studio'], ['ai-studio', 'AI Art Studio'], ['ai-collection-studio', 'AI Collection Studio'], ['painter-studio', 'Painter & Mural Studio'], ['collage-studio', 'Poster & Collage Studio']] as [View, string][]).map(([nextView, label]) => <button key={nextView} className={`mobile-menu-studio ${view === nextView ? 'is-active' : ''}`} onClick={() => { navTo(nextView); setOpenPopover(null) }}>{label}<Icon name="arrow" size={13} /></button>)}
           {([['analytics', 'Analytics'], ['settings', 'Settings'], ['feedback', 'Feedback']] as [View, string][]).map(([nextView, label]) => <button key={nextView} className={view === nextView ? 'is-active' : ''} onClick={() => { navTo(nextView); setOpenPopover(null) }}>{label}</button>)}
-          <button type="button" onClick={() => { setOpenPopover(null); window.dispatchEvent(new Event('stellanova:install')) }}>Install StellaNova</button>
+          <button type="button" onClick={() => { setOpenPopover(null); window.dispatchEvent(new Event('stellanova:install')) }}>Install NovaMarket</button>
         </nav>}
         {notificationsOpen && (
           <div className="notification-popover" data-popover-content>
             <div className="notification-popover__header"><b>Notifications</b><button type="button" onClick={() => void handleMarkAllRead()} disabled={unreadCount === 0}>Mark all read</button></div>
             <div className="notification-browser-alerts">
-              <span><b>Browser alerts</b><small>{browserPushState === 'on' ? 'Likes, collection mints, and marketplace activity' : browserPushState === 'denied' ? 'Allow notifications in your browser settings' : browserPushState === 'unsupported' ? 'Not supported by this browser' : 'Get important activity even when StellaNova is closed'}</small></span>
+              <span><b>Browser alerts</b><small>{browserPushState === 'on' ? 'Likes, collection mints, and marketplace activity' : browserPushState === 'denied' ? 'Allow notifications in your browser settings' : browserPushState === 'unsupported' ? 'Not supported by this browser' : 'Get important activity even when NovaMarket is closed'}</small></span>
               <div className="notification-browser-alerts__actions">
                 {(browserPushState === 'on' || browserPushState === 'off') && <button type="button" onClick={() => void handleBrowserPushToggle()} disabled={browserPushBusy || !stellarWallet}>{browserPushBusy ? 'Saving…' : browserPushState === 'on' ? 'Turn off' : 'Enable'}</button>}
-                {browserPushState === 'on' && <button type="button" onClick={() => void handleBrowserPushTest()} disabled={browserPushTestBusy || !stellarWallet}>{browserPushTestBusy ? 'Sending…' : 'Send test alert'}</button>}
               </div>
             </div>
             {notifications.length ? notifications.slice(0, 6).map((note) => (
@@ -2070,23 +2120,25 @@ function App() {
 
         {!isOnline && <div className="offline-banner"><Icon name="activity" size={15} /><span><b>You’re offline.</b> The app shell is available; Testnet data needs a connection.</span></div>}
 
-        {detail ? <DetailView detail={detail} allNfts={socializedMarketNfts} allCollections={allCollections} posts={posts} saved={saved} toggleSaved={toggleSaved} openNft={openNft} onBack={() => { if (window.history.state?.stellaNovaRoute) window.history.back(); else navTo('home') }} onCreator={(id) => setDetail({ type: 'creator', id })} onCollection={(item) => setDetail({ type: 'collection', item })} onBuy={(item) => openWallet(item, item.saleType === 'Auction' ? 'bid' : 'buy')} onOffer={(item) => openWallet(item, 'offer')} comments={comments} onComment={addComment} liked={liked} disliked={disliked} onLike={handleFeedNftLike} onDislike={toggleDislike} onSell={handleSell} creatorFollows={creatorFollows} onFollowCreator={handleCreatorFollow} subscribedCollections={subscribedCollections} onFollowCollection={toggleSubscription} stellarWallet={stellarWallet} walletCollections={walletCollections} marketplace={marketplace} onAcceptOffer={handleAcceptOffer} onRejectOffer={handleRejectOffer} onCounterOffer={handleCounterOffer} notify={notify} setMintedNfts={setMintedNfts} onStageMintsConfirmed={handleStageMintsConfirmed} onCreateCollectionPost={handleCreateCollectionPost} onCreateCollectionStory={handleCreateCollectionStory} onPostLike={handleFeedPostLike} onPostDislike={handlePostDislike} onPostComment={handlePostComment} onCollectionUpdated={(id, changes) => { setAllCollections((items) => items.map((item) => item.id === id ? { ...item, ...changes } : item)); setWalletCollections((items) => items.map((item) => item.slug === id ? { ...item, cover: changes.cover ?? item.cover } : item)); setDetail((current) => current?.type === 'collection' && current.item.id === id ? { ...current, item: { ...current.item, ...changes } } : current) }} /> : (
+        {detail ? <DetailView detail={detail} allNfts={socializedMarketNfts} allCollections={allCollections} posts={posts} saved={saved} toggleSaved={toggleSaved} openNft={openNft} onBack={() => { if (window.history.state?.stellaNovaRoute) window.history.back(); else navTo('home') }} onCreator={(id) => setDetail({ type: 'creator', id })} onCollection={(item) => setDetail({ type: 'collection', item })} onBuy={(item) => openWallet(item, item.saleType === 'Auction' ? 'bid' : 'buy')} onOffer={(item) => openWallet(item, 'offer')} comments={comments} onComment={addComment} liked={liked} disliked={disliked} onLike={handleFeedNftLike} onDislike={toggleDislike} onSell={handleSell} creatorFollows={creatorFollows} onFollowCreator={handleCreatorFollow} subscribedCollections={subscribedCollections} onFollowCollection={toggleSubscription} stellarWallet={stellarWallet} walletCollections={walletCollections} marketplace={marketplace} onAcceptOffer={handleAcceptOffer} onRejectOffer={handleRejectOffer} onCounterOffer={handleCounterOffer} notify={notify} setMintedNfts={setMintedNfts} onStageMintsConfirmed={handleStageMintsConfirmed} onCreateCollectionPost={handleCreateCollectionPost} onCreateCollectionStory={handleCreateCollectionStory} onPostLike={handleFeedPostLike} onPostDislike={handlePostDislike} onPostComment={handlePostComment} onCollectionUpdated={(id, changes) => { const revealedCover = changes.revealed ? mintedNfts.find((mint) => mint.collection_id?.toLowerCase() === id.toLowerCase() && mint.image)?.image : undefined; const nextChanges = revealedCover ? { ...changes, cover: revealedCover } : changes; setAllCollections((items) => items.map((item) => item.id === id ? { ...item, ...nextChanges } : item)); setWalletCollections((items) => items.map((item) => item.slug === id ? { ...item, ...nextChanges, cover: nextChanges.cover ?? item.cover } : item)); setDetail((current) => current?.type === 'collection' && current.item.id === id ? { ...current, item: { ...current.item, ...nextChanges } } : current); if (changes.revealed) void fetchPublicCollections().then((rows) => { const latest = rows.find((row) => row.slug.toLowerCase() === id.toLowerCase()); if (!latest) return; setAllCollections((items) => items.map((item) => item.id.toLowerCase() === id.toLowerCase() ? { ...item, cover: latest.cover, revealed: latest.revealed } : item)); setWalletCollections((items) => items.map((item) => item.slug.toLowerCase() === id.toLowerCase() ? { ...item, cover: latest.cover } : item)); setDetail((current) => current?.type === 'collection' && current.item.id.toLowerCase() === id.toLowerCase() ? { ...current, item: { ...current.item, cover: latest.cover, revealed: latest.revealed } } : current) }).catch(() => {}) }} /> : (
           <>
             {view === 'home' && <HomeView allNfts={socializedMarketNfts} ownedNfts={ownedItems} composeNft={composeNft} setComposeNft={setComposeNft} onMintNft={startMintFlow} authorName={account?.creator_username ? `@${account.creator_username}` : account?.display_name || 'Creator'} authorAvatar={account?.avatar || ''} allCollections={allCollections} onOpen={openNft} saved={saved} toggleSaved={toggleSaved} onCreator={(id) => setDetail({ type: 'creator', id })} onCollection={(item) => setDetail({ type: 'collection', item })} feedPreferences={feedPreferences} liked={liked} disliked={disliked} comments={comments} onLike={handleFeedNftLike} onDislike={toggleDislike} onNftComment={addComment} posts={posts} storyGroups={storyGroups} sharedPostId={sharedPostId} walletAddress={stellarWallet?.address ?? ''} stellarWallet={stellarWallet} onCreateCreatorStory={handleCreateCreatorStory} notify={notify} onBuyMarketItem={(item) => openWallet(item, item.saleType === 'Auction' ? 'bid' : 'buy')} onOfferMarketItem={(item) => openWallet(item, 'offer')} postsLoadState={postsLoadState} onRetryPosts={loadPosts} composeOpen={composeOpen} setComposeOpen={setComposeOpen} composeText={composeText} setComposeText={setComposeText} composeFile={composeFile} setComposeFile={setComposeFile} posting={posting} onCreatePost={handleCreatePost} onPostLike={handleFeedPostLike} onPostDislike={handlePostDislike} onPostComment={handlePostComment} onTipPost={handleTipPost} />}
             {view === 'explore' && <ExploreView allCollections={allCollections} activeListings={activeListings} onBulkBuy={handleBulkBuy} onSell={handleSell} liked={liked} disliked={disliked} onLike={handleFeedNftLike} onDislike={toggleDislike} items={filteredNfts} onOpen={openNft} saved={saved} toggleSaved={toggleSaved} activeFilter={activeFilter} setActiveFilter={setActiveFilter} marketTab={marketTab} setMarketTab={setMarketTab} sortBy={sortBy} setSortBy={setSortBy} onCreator={(id) => setDetail({ type: 'creator', id })} onCollection={(item) => setDetail({ type: 'collection', item })} />}
-            {view === 'services' && <CreatorServicesPage wallet={stellarWallet} notify={notify} />}
-            {view === 'physical-art' && <PhysicalArtPage wallet={stellarWallet} notify={notify} />}
-            {view === 'exhibitions' && <ExhibitionsPage wallet={stellarWallet} notify={notify} />}
+            {view === 'services' && <Suspense fallback={<div className="studio-loading" role="status">Opening creator services…</div>}><CreatorServicesPage wallet={stellarWallet} notify={notify} onAuthenticate={openWallet} /></Suspense>}
+            {view === 'physical-art' && <Suspense fallback={<div className="studio-loading" role="status">Opening physical art…</div>}><PhysicalArtPage wallet={stellarWallet} notify={notify} onAuthenticate={openWallet} /></Suspense>}
+            {view === 'exhibitions' && <Suspense fallback={<div className="studio-loading" role="status">Opening exhibitions…</div>}><ExhibitionsPage wallet={stellarWallet} notify={notify} onAuthenticate={openWallet} /></Suspense>}
             {view === 'collections' && <CollectionsView collections={allCollections} posts={posts} allNfts={socializedMarketNfts} walletAddress={stellarWallet?.address ?? ''} onOpen={(item) => setDetail({ type: 'collection', item })} onOpenNft={openNft} onCreator={(id) => setDetail({ type: 'creator', id })} onBuyNft={(item) => openWallet(item, item.saleType === 'Auction' ? 'bid' : 'buy')} onOfferNft={(item) => openWallet(item, 'offer')} onPostLike={handleFeedPostLike} onPostDislike={handlePostDislike} onPostComment={handlePostComment} disliked={disliked} subscribedCollections={subscribedCollections} onSubscribe={toggleSubscription} collectionSocial={collectionSocial} onCollectionReaction={handleCollectionReaction} onCollectionComment={handleCollectionComment} />}
             {view === 'saved' && <SavedView allCollections={allCollections} onSell={handleSell} liked={liked} disliked={disliked} onLike={handleFeedNftLike} onDislike={toggleDislike} saved={saved} items={marketNfts.filter((item) => saved.includes(item.id))} onOpen={openNft} toggleSaved={toggleSaved} onCollection={(item) => setDetail({ type: 'collection', item })} />}
-            {view === 'account' && <AccountView allNfts={socializedMarketNfts} ownedNfts={[...ownedItems, ...accountOwnedMints.map((mint) => mintedToNft(mint, allCollections))]} allCollections={allCollections} posts={posts} account={account} stellarWallet={stellarWallet} walletCollections={walletCollections} onCopyAddress={copyStellarAddress} onCreateCollection={openCollectionCreation} onOpen={openNft} saved={saved} toggleSaved={toggleSaved} liked={liked} disliked={disliked} onLike={handleFeedNftLike} onDislike={toggleDislike} onSell={handleSell} onBulkList={handleBulkList} onCollection={(item) => setDetail({ type: 'collection', item })} onCreator={(id) => setDetail({ type: 'creator', id })} subscriptions={subscribedCollections} onSubscribe={toggleSubscription} onCreateMint={startMintFlow} marketplace={marketplace} onCancelListing={handleCancelListing} onCancelOffer={handleCancelOffer} onAcceptOffer={handleAcceptOffer} onRejectOffer={handleRejectOffer} onCounterOffer={handleCounterOffer} onCounterResponse={handleCounterResponse} onSaveProfile={savePublicProfile} onDisconnectWallet={handleDisconnectWallet} />}
+            {view === 'account' && <AccountView allNfts={socializedMarketNfts} ownedNfts={[...ownedItems, ...accountOwnedMints.map((mint) => mintedToNft(mint, allCollections))]} allCollections={allCollections} posts={posts} account={account} stellarWallet={stellarWallet} walletCollections={walletCollections} onCopyAddress={copyStellarAddress} onCreateCollection={openCollectionCreation} onOpen={openNft} saved={saved} toggleSaved={toggleSaved} liked={liked} disliked={disliked} onLike={handleFeedNftLike} onDislike={toggleDislike} onSell={handleSell} onBulkList={handleBulkList} onCollection={(item) => setDetail({ type: 'collection', item })} onCreator={(id) => setDetail({ type: 'creator', id })} subscriptions={subscribedCollections} onSubscribe={toggleSubscription} onCreateMint={startMintFlow} marketplace={marketplace} onCancelListing={handleCancelListing} onCancelOffer={handleCancelOffer} onAcceptOffer={handleAcceptOffer} onRejectOffer={handleRejectOffer} onCounterOffer={handleCounterOffer} onCounterResponse={handleCounterResponse} onSaveProfile={savePublicProfile} onAuthenticate={openWallet} onDisconnectWallet={handleDisconnectWallet} />}
             {view === 'analytics' && <AnalyticsView walletAddress={stellarWallet?.address ?? ''} isAdmin={Boolean(account?.is_admin)} />}
+            {view === 'admin' && <AdminDashboard walletAddress={stellarWallet?.address ?? ''} isAdmin={Boolean(account?.is_admin)} />}
             {view === 'settings' && <SettingsView feedPreferences={feedPreferences} setFeedPreferences={setFeedPreferences} />}
             {view === 'feedback' && <FeedbackView />}
-            {view === 'pixel-studio' && <PixelStudioPage collections={walletCollections} busy={minting} error={mintError} success={mintSuccess} onMint={handleMintNft} onPostToFeed={postStudioArtworkToFeed} onHome={() => navTo('home')} />}
-            {view === 'ai-studio' && <AiStudioPage collections={walletCollections} busy={minting} error={mintError} success={mintSuccess} onMint={handleMintNft} onGenerate={generateAiArtwork} onPostToFeed={postStudioArtworkToFeed} onHome={() => navTo('home')} />}
-            {view === 'ai-collection-studio' && <AiCollectionStudioPage walletAddress={stellarWallet?.address ?? ''} onGenerate={generateAiArtwork} onAnalyze={analyzeAiArtwork} onVerifyTraits={verifyAiArtworkTraits} onPlanTraits={planAiCollectionTraits} onCreateCollection={createAiStudioCollection} onSaveArtwork={saveAiStudioArtwork} onOpenCollectionDashboard={(slug: string) => { const item = allCollections.find((collection) => collection.id === slug) ?? collectionFor(slug); setView('home'); setDetail({ type: 'collection', item }) }} onHome={() => navTo('home')} />}
-            {view === 'painter-studio' && <PainterStudioPage collections={walletCollections} busy={minting} error={mintError} success={mintSuccess} onMint={handleMintNft} onPostToFeed={postStudioArtworkToFeed} onHome={() => navTo('home')} />}
+            {view === 'pixel-studio' && <Suspense fallback={<div className="studio-loading" role="status">Opening Pixel Studio…</div>}><PixelStudioPage collections={walletCollections} busy={minting} error={mintError} success={mintSuccess} onMint={handleMintNft} onPostToFeed={postStudioArtworkToFeed} onHome={() => navTo('home')} /></Suspense>}
+            {view === 'ai-studio' && <Suspense fallback={<div className="studio-loading" role="status">Opening AI Art Studio…</div>}><AiStudioPage collections={walletCollections} busy={minting} error={mintError} success={mintSuccess} onMint={handleMintNft} onGenerate={generateAiArtwork} onPostToFeed={postStudioArtworkToFeed} onHome={() => navTo('home')} /></Suspense>}
+            {view === 'ai-collection-studio' && <Suspense fallback={<div className="studio-loading" role="status">Opening AI Collection Studio…</div>}><AiCollectionStudioPage walletAddress={stellarWallet?.address ?? ''} onGenerate={generateAiArtwork} onAnalyze={analyzeAiArtwork} onVerifyTraits={verifyAiArtworkTraits} onPlanTraits={planAiCollectionTraits} onCreateCollection={createAiStudioCollection} onSaveArtwork={saveAiStudioArtwork} onOpenCollectionDashboard={(slug: string) => { const item = allCollections.find((collection) => collection.id === slug) ?? collectionFor(slug); setView('home'); setDetail({ type: 'collection', item }) }} onHome={() => navTo('home')} /></Suspense>}
+            {view === 'painter-studio' && <Suspense fallback={<div className="studio-loading" role="status">Opening Painter & Mural Studio…</div>}><PainterStudioPage collections={walletCollections} busy={minting} error={mintError} success={mintSuccess} onMint={handleMintNft} onPostToFeed={postStudioArtworkToFeed} onHome={() => navTo('home')} /></Suspense>}
+            {view === 'collage-studio' && <Suspense fallback={<div className="studio-loading" role="status">Opening Poster & Collage Studio…</div>}><CollagePosterStudioPage collections={walletCollections} busy={minting} error={mintError} success={mintSuccess} onMint={handleMintNft} onPostToFeed={postStudioArtworkToFeed} onHome={() => navTo('home')} /></Suspense>}
           </>
         )}
       </main>
@@ -2096,10 +2148,10 @@ function App() {
         <DockItem icon="compass" label="Explore" active={view === 'explore' && !detail} onClick={() => navTo('explore')} />
         <button className="dock-create" aria-label="Create" onClick={() => setCreateChooserOpen(true)}><Icon name="plus" size={20} /><span>Create</span></button>
         <DockItem icon="grid" label="Collections" active={view === 'collections' && !detail} onClick={() => navTo('collections')} />
-        <DockItem icon="user" label="Account" active={view === 'account' && !detail} onClick={() => (stellarWallet ? navTo('account') : openWallet())} />
+        <DockItem icon="user" label="Account" active={view === 'account' && !detail} onClick={() => navTo('account')} />
       </nav>
 
-      {walletOpen && <WalletModal key={`${walletMode}-${walletItem?.id ?? 'connect'}`} item={walletItem} mode={walletMode} auction={walletAuction} wallet={stellarWallet} emailSignIn={privyAuth.configured} emailReady={privyAuth.ready} onClose={() => setWalletOpen(false)} onConnect={handleConnectWallet} onConnectFreighter={handleConnectFreighter} onPurchase={handleOnChainAction} actionStatus={walletActionStatus} actionError={walletActionError} />}
+      {walletOpen && <WalletModal key={`${walletMode}-${walletItem?.id ?? 'connect'}`} item={walletItem} mode={walletMode} auction={walletAuction} wallet={stellarWallet} emailSignIn={privyAuth.configured} emailReady={privyAuth.ready} lastAuthMethod={lastAuthMethod} onClose={() => setWalletOpen(false)} onConnect={handleConnectWallet} onConnectFreighter={handleConnectFreighter} onConnectMetaMask={handleConnectMetaMask} showMetaMask={STELLAR_NETWORK === 'PUBLIC'} onPurchase={handleOnChainAction} actionStatus={walletActionStatus} actionError={walletActionError} />}
       {walletOverviewOpen && stellarWallet && <WalletDetailsModal wallet={stellarWallet} onClose={() => setWalletOverviewOpen(false)} />}
       {onboardingOpen && <CreatorOnboardingModal name={onboardName} setName={setOnboardName} symbol={onboardSymbol} setSymbol={setOnboardSymbol} description={onboardDesc} setDescription={setOnboardDesc} totalSupply={onboardSupply} setTotalSupply={setOnboardSupply} coverImage={onboardCover} setCoverImage={setOnboardCover} creating={collectionCreating} onClose={closeCollectionCreation} onCreate={handleCreateMyCollection} />}
       {mintOpen && <MintModal open={mintOpen} firstCollectionMintStep={firstCollectionMintStep} onClose={() => { setMintOpen(false); setFirstCollectionMintStep(false) }} targetCollection={walletCollections.find((collection) => collection.slug === mintTargetCollectionSlug) ?? null} success={mintSuccess} onDone={() => { const target = walletCollections.find((collection) => collection.slug === mintTargetCollectionSlug); setMintOpen(false); setFirstCollectionMintStep(false); setMintTitle(''); setMintDescription(''); setMintFile(null); setMintArtworkUrl(''); setMintMediaFile(null); setMintTraits(''); setMintSuccess(null); if (target) { const item = allCollections.find((collection) => collection.id === target.slug) ?? collectionFor(target.slug); setView('collections'); setDetail({ type: 'collection', item }) } else navTo('account') }} title={mintTitle} setTitle={setMintTitle} description={mintDescription} setDescription={setMintDescription} artwork={mintFile} setArtwork={setMintFile} artworkUrl={mintArtworkUrl} setArtworkUrl={setMintArtworkUrl} media={mintMediaFile} setMedia={setMintMediaFile} traits={mintTraits} setTraits={setMintTraits} error={mintError} onMint={() => handleMintNft(undefined, mintTargetCollectionSlug)} minting={minting} />}
@@ -2133,7 +2185,6 @@ function InstallExperience() {
     displayMode.addEventListener?.('change', displayModeChanged)
     return () => {
       window.removeEventListener('beforeinstallprompt', beforeInstall)
-            {view === 'collage-studio' && <Suspense fallback={<div className="studio-loading" role="status">Opening Poster & Collage Studio…</div>}><CollagePosterStudioPage collections={walletCollections} busy={minting} error={mintError} success={mintSuccess} onMint={handleMintNft} onPostToFeed={postStudioArtworkToFeed} onHome={() => navTo('home')} /></Suspense>}
       window.removeEventListener('appinstalled', installedHandler)
       window.removeEventListener('stellanova:install', requestInstall)
       displayMode.removeEventListener?.('change', displayModeChanged)
@@ -2152,12 +2203,12 @@ function InstallExperience() {
     {guideOpen && !installed && <div className="pwa-install-backdrop" role="presentation" onClick={() => setGuideOpen(false)}>
       <section className="pwa-install-dialog" role="dialog" aria-modal="true" aria-labelledby="pwa-install-title" onClick={(event) => event.stopPropagation()}>
         <button type="button" className="pwa-install-close" onClick={() => setGuideOpen(false)} aria-label="Close">×</button>
-        <span className="eyebrow">STELLANOVA APP</span>
-        <h2 id="pwa-install-title">Take StellaNova with you</h2>
-        {inTelegram ? <><p>Install StellaNova from your browser for a full-screen app experience. Your account and collections stay available on the web too.</p><Button onClick={() => { openCurrentPageInBrowser(); setGuideOpen(false) }}>Open in browser</Button></>
-          : promptEvent ? <><p>Add StellaNova to your home screen for a fast, app-like experience.</p><Button onClick={() => void install()}>Install StellaNova</Button></>
+        <span className="eyebrow">NOVAMARKET APP</span>
+        <h2 id="pwa-install-title">Take NovaMarket with you</h2>
+        {inTelegram ? <><p>Install NovaMarket from your browser for a full-screen app experience. Your account and collections stay available on the web too.</p><Button onClick={() => { openCurrentPageInBrowser(); setGuideOpen(false) }}>Open in browser</Button></>
+          : promptEvent ? <><p>Add NovaMarket to your home screen for a fast, app-like experience.</p><Button onClick={() => void install()}>Install NovaMarket</Button></>
             : /iPad|iPhone|iPod/.test(navigator.userAgent) ? <><p>In Safari, tap <b>Share</b>, then choose <b>Add to Home Screen</b>.</p><Button variant="outline" onClick={() => setGuideOpen(false)}>Got it</Button></>
-              : <><p>Choose <b>Install app</b> or <b>Add to Home screen</b> from your browser menu to use StellaNova as an app.</p><Button variant="outline" onClick={() => setGuideOpen(false)}>Got it</Button></>}
+              : <><p>Choose <b>Install app</b> or <b>Add to Home screen</b> from your browser menu to use NovaMarket as an app.</p><Button variant="outline" onClick={() => setGuideOpen(false)}>Got it</Button></>}
       </section>
     </div>}
   </>
@@ -2188,7 +2239,7 @@ function DeploymentConsole({ wallet, onConnect }: { wallet: StellarWallet | null
       setStatus('Installing and deploying the SEP-50 NFT contract. Freighter will request Testnet signatures for installation, creation and configuration.')
       const nft = await deploySorobanWasm('/contracts/nftgram_nft.wasm', wallet, [
         StellarSdk.nativeToScVal(metadataBaseUri, { type: 'string' }),
-        StellarSdk.nativeToScVal('StellaNova Editions', { type: 'string' }),
+        StellarSdk.nativeToScVal('NovaMarket Editions', { type: 'string' }),
         StellarSdk.nativeToScVal('STNV', { type: 'string' }),
         StellarSdk.nativeToScVal(wallet.address, { type: 'address' }),
       ])
@@ -2217,7 +2268,7 @@ function DeploymentConsole({ wallet, onConnect }: { wallet: StellarWallet | null
     }
   }
 
-  return <div className="app-shell"><main className="main-content"><div className="page"><section className="page-heading page-heading--compact"><div><span className="eyebrow">STELLAR TESTNET · DEPLOYMENT</span><h1>Make StellaNova<br /><i>real on-chain.</i></h1></div><button className="round-action" onClick={() => window.location.assign('/')} aria-label="Back to StellaNova"><Icon name="arrow" size={20} /></button></section><section className="section-block"><div className="section-title"><div><span className="eyebrow">SOROBAN CONTRACTS</span><h3>SEP-50 NFT + marketplace</h3></div><span className="market-status"><i /> TESTNET ONLY</span></div><p className="collection-description">This console installs and deploys the compiled contracts, then initializes StellaNova metadata and a 2.5% marketplace fee. Every network transaction is simulated, prepared and signed by your connected Freighter wallet.</p><div className="purchase-intent"><div><small>Wallet</small><b>{wallet ? shortenStellarAddress(wallet.address) : 'Not connected'}</b><em>{wallet ? 'Ready for Freighter signing' : 'Connect to continue'}</em></div><Button onClick={wallet ? deploy : onConnect} disabled={busy}>{busy ? 'Waiting for Testnet…' : wallet ? 'Deploy contracts' : 'Connect Freighter'} <Icon name="arrow" size={15} /></Button></div><div className="detail-meta"><Meta label="NFT contract" value={nftContract || 'Not deployed'} /><Meta label="Marketplace" value={marketplaceContract || 'Not deployed'} /><Meta label="Network" value="Stellar Testnet" /><Meta label="Fee" value="2.5%" /></div><div className="detail-note"><Icon name="spark" size={16} /><span><b>Deployment status</b><small>{status}</small></span></div></section><section className="section-block"><div className="section-title"><div><span className="eyebrow">NEXT CONFIGURATION</span><h3>Connect the deployed IDs</h3></div></div><p className="collection-description">After deployment, set <code>VITE_STELLAR_NFT_CONTRACT_ID</code> and <code>VITE_STELLAR_MARKETPLACE_CONTRACT_ID</code> in the project environment and reload StellaNova. Testnet contract IDs are stored locally in this browser for this deployment session.</p></section></div></main></div>
+  return <div className="app-shell"><main className="main-content"><div className="page"><section className="page-heading page-heading--compact"><div><span className="eyebrow">STELLAR TESTNET · DEPLOYMENT</span><h1>Make NovaMarket<br /><i>real on-chain.</i></h1></div><button className="round-action" onClick={() => window.location.assign('/')} aria-label="Back to NovaMarket"><Icon name="arrow" size={20} /></button></section><section className="section-block"><div className="section-title"><div><span className="eyebrow">SOROBAN CONTRACTS</span><h3>SEP-50 NFT + marketplace</h3></div><span className="market-status"><i /> TESTNET ONLY</span></div><p className="collection-description">This console installs and deploys the compiled contracts, then initializes NovaMarket metadata and a 2.5% marketplace fee. Every network transaction is simulated, prepared and signed by your connected Freighter wallet.</p><div className="purchase-intent"><div><small>Wallet</small><b>{wallet ? shortenStellarAddress(wallet.address) : 'Not connected'}</b><em>{wallet ? 'Ready for Freighter signing' : 'Connect to continue'}</em></div><Button onClick={wallet ? deploy : onConnect} disabled={busy}>{busy ? 'Waiting for Testnet…' : wallet ? 'Deploy contracts' : 'Connect Freighter'} <Icon name="arrow" size={15} /></Button></div><div className="detail-meta"><Meta label="NFT contract" value={nftContract || 'Not deployed'} /><Meta label="Marketplace" value={marketplaceContract || 'Not deployed'} /><Meta label="Network" value="Stellar Testnet" /><Meta label="Fee" value="2.5%" /></div><div className="detail-note"><Icon name="spark" size={16} /><span><b>Deployment status</b><small>{status}</small></span></div></section><section className="section-block"><div className="section-title"><div><span className="eyebrow">NEXT CONFIGURATION</span><h3>Connect the deployed IDs</h3></div></div><p className="collection-description">After deployment, set <code>VITE_STELLAR_NFT_CONTRACT_ID</code> and <code>VITE_STELLAR_MARKETPLACE_CONTRACT_ID</code> in the project environment and reload NovaMarket. Testnet contract IDs are stored locally in this browser for this deployment session.</p></section></div></main></div>
 }
 
 function NavItem({ icon, label, active, count, onClick }: { icon: 'home' | 'compass' | 'grid' | 'layers' | 'pixel' | 'bookmark' | 'user' | 'settings' | 'plus' | 'activity' | 'image' | 'spark' | 'briefcase' | 'gallery' | 'palette' | 'chart' | 'comment'; label: string; active?: boolean; count?: number; onClick: () => void }) {
@@ -2240,7 +2291,7 @@ function DockItem({ icon, label, active, count, onClick }: { icon: 'home' | 'com
 }
 
 function LaunchSplash() {
-  return <main className="launch-splash" aria-label="Loading StellaNova"><PrismMark size={38} /><span><b>Stella</b>Nova</span></main>
+  return <main className="launch-splash" aria-label="Loading NovaMarket"><PrismMark size={38} /><span>NovaMarket</span></main>
 }
 
 function WelcomeView({ collections, emailSignIn, onSignUp, onLogIn, onConnectFreighter }: { collections: Collection[]; emailSignIn: boolean; onSignUp: () => void; onLogIn: () => void; onConnectFreighter: () => void }) {
@@ -2248,15 +2299,15 @@ function WelcomeView({ collections, emailSignIn, onSignUp, onLogIn, onConnectFre
   return <main className="auth-landing">
     <section className="auth-landing__story">
       <div className="auth-landing__message"><h1>Discover digital collectibles<br />from your <em>favorite creators.</em></h1>
-        <div className="auth-preview" aria-label="A preview of StellaNova collectibles">
+        <div className="auth-preview" aria-label="A preview of NovaMarket collectibles">
           {previews.length ? previews.map((collection, index) => <div key={collection.id} className={`auth-preview__tile auth-preview__tile--${index + 1}`}><img src={mediaSource(collection.cover)} alt={collection.name} /></div>) : nfts.slice(0, 3).map((item, index) => <div key={item.id} className={`auth-preview__tile auth-preview__tile--${index + 1}`}><img src={mediaSource(item.image)} alt={item.title} /></div>)}
           {!previews.length && !nfts.length && <div className="auth-preview__tile auth-preview__tile--placeholder auth-preview__tile--2"><span className="auth-preview__placeholder-art">✦</span></div>}
         </div>
       </div>
     </section>
     <section className="auth-landing__join">
-      <div className="auth-landing__join-inner"><PrismMark size={96} className="stellanova-mark--welcome" /><h2>Explore and collect<br />digital art on StellaNova</h2>
-        <Button onClick={emailSignIn ? onSignUp : onConnectFreighter}>Explore StellaNova</Button>
+      <div className="auth-landing__join-inner"><PrismMark size={96} className="stellanova-mark--welcome" /><h2>Explore and collect<br />digital art on NovaMarket</h2>
+        <Button onClick={emailSignIn ? onSignUp : onConnectFreighter}>Explore NovaMarket</Button>
         <div className="auth-landing__signin"><button onClick={onLogIn}>Log in</button><span>or</span><button onClick={onSignUp}>Sign up</button></div>
         <a className="auth-landing__feedback" href="/feedback">Give feedback</a>
       </div>
@@ -2318,7 +2369,7 @@ function CollectionStories({ groups, collections, onCollection, wallet, onCreate
   const otherGroups = visible.filter((group) => !(group.kind === 'creator' && group.isMine))
   const hasUnseen = (group: CollectionStoryGroup) => group.stories.some((story) => !story.viewed && !viewedLocally.has(`${group.kind}:${story.id}`))
   return <><section className="desktop-stories" aria-label="Stories"><div className="desktop-stories__row">
-    <button className={`desktop-story ${yourStatus?.stories.length ? (hasUnseen(yourStatus) ? 'desktop-story--unseen' : 'desktop-story--seen') : 'desktop-story--empty'}`} title={wallet ? 'Add or view your status' : 'Sign in to share a status'} onClick={() => { if (!wallet) { notify('Sign in to share a status'); return } yourStatus?.stories.length ? openGroup(yourStatus) : setComposeOpen(true) }}><span><Avatar src={yourStatus?.cover || ''} alt="Your status" size="md" ring />{!yourStatus?.stories.length && <i>+</i>}</span><small>Your status</small></button>
+    <button className={`desktop-story ${yourStatus?.stories.length ? (hasUnseen(yourStatus) ? 'desktop-story--unseen' : 'desktop-story--seen') : 'desktop-story--empty'}`} title={wallet ? 'Add or view your status' : 'Sign in to share a status'} onClick={() => { if (!wallet) { void onCreate("", "", "image"); return } yourStatus?.stories.length ? openGroup(yourStatus) : setComposeOpen(true) }}><span><Avatar src={yourStatus?.cover || ''} alt="Your status" size="md" ring />{!yourStatus?.stories.length && <i>+</i>}</span><small>Your status</small></button>
     {otherGroups.map((group) => {
       const isCollection = group.kind === 'collection'
       const collection = isCollection ? collections.find((item) => item.id === group.collectionId) ?? collectionFor(group.collectionId) : null
@@ -2342,7 +2393,7 @@ function HomeView({ allNfts, ownedNfts, walletAddress, stellarWallet, onCreateCr
         if (collection) onCollection(collection)
         else if (post.author_type === 'user') onCreator(post.creator_wallet || post.author)
       }}><Avatar src={collection?.cover || post.avatar} alt={name} size="md" /><span className="desktop-suggestions__copy"><b>{name}</b><small>{collection ? 'Collection' : 'Suggested creator'}</small></span><em>{collection ? 'View' : 'Profile'}</em></button>
-    })}{!posts.length && allCollections.slice(0, 5).map((collection) => <button key={collection.id} onClick={() => onCollection(collection)}><Avatar src={collection.cover} alt={collection.name} size="md" /><span className="desktop-suggestions__copy"><b>{collection.name}</b><small>{collection.items} collectibles</small></span><em>View</em></button>)}<footer>About · Help · Privacy · Terms<br />© 2026 StellaNova</footer></aside>
+    })}{!posts.length && allCollections.slice(0, 5).map((collection) => <button key={collection.id} onClick={() => onCollection(collection)}><Avatar src={collection.cover} alt={collection.name} size="md" /><span className="desktop-suggestions__copy"><b>{collection.name}</b><small>{collection.items} collectibles</small></span><em>View</em></button>)}<footer>About · Help · Privacy · Terms<br />© 2026 NovaMarket</footer></aside>
   </div>
 }
 function ExploreView({ allCollections, items, activeListings, onBulkBuy, onOpen, saved, toggleSaved, activeFilter, setActiveFilter, marketTab, setMarketTab, sortBy, setSortBy, onCreator, onCollection, onSell, liked, disliked, onLike, onDislike }: { allCollections: Collection[]; items: NFT[]; activeListings: MarketplaceListing[]; onBulkBuy: (items: NFT[]) => void; onOpen: (item: NFT) => void; saved: string[]; toggleSaved: (id: string) => void; activeFilter: string; setActiveFilter: (filter: string) => void; marketTab: MarketTab; setMarketTab: (tab: MarketTab) => void; sortBy: string; setSortBy: (sort: string) => void; onCreator: (id: string) => void; onCollection: (item: Collection) => void; onSell: (item: NFT) => void; liked: string[]; disliked: string[]; onLike: (id: string) => void; onDislike: (id: string) => void }) {
@@ -2412,10 +2463,10 @@ function AnalyticsView({ walletAddress = '', isAdmin = false }: { walletAddress?
     const week = snapshot.daily.slice(-7)
     const minted = week.reduce((total, day) => total + day.mints, 0)
     const volume = week.reduce((total, day) => total + Number(day.volume_xlm || 0), 0)
-    const text = `StellaNova · 7-day Stellar Testnet snapshot\n${minted.toLocaleString()} NFTs minted · ${snapshot.summary.sales.toLocaleString()} completed marketplace sales all-time · ${volume.toLocaleString(undefined, { maximumFractionDigits: 2 })} XLM total volume this week (paid mints + completed trades)\n${snapshot.summary.collections.toLocaleString()} collections · ${snapshot.summary.holders.toLocaleString()} wallet holders\n${window.location.origin}/analytics`
+    const text = `NovaMarket · 7-day Stellar Testnet snapshot\n${minted.toLocaleString()} NFTs minted · ${snapshot.summary.sales.toLocaleString()} completed marketplace sales all-time · ${volume.toLocaleString(undefined, { maximumFractionDigits: 2 })} XLM total volume this week (paid mints + completed trades)\n${snapshot.summary.collections.toLocaleString()} collections · ${snapshot.summary.holders.toLocaleString()} wallet holders\n${window.location.origin}/analytics`
     setShareMessage('')
     try {
-      if (navigator.share) await navigator.share({ title: 'StellaNova marketplace snapshot', text })
+      if (navigator.share) await navigator.share({ title: 'NovaMarket marketplace snapshot', text })
       else { await navigator.clipboard.writeText(text); setShareMessage('Snapshot copied. Paste it into your social post.') }
     } catch (cause) {
       if (cause instanceof Error && cause.name !== 'AbortError') setShareMessage('Could not open sharing. Copy the page link from your browser.')
@@ -2483,7 +2534,7 @@ function CollectionsView({ collections, posts, allNfts, walletAddress, onOpen, o
           <CollectionSocialActions collectionId={collection.id} social={collectionSocial[collection.id]} onReaction={onCollectionReaction} onComment={onCollectionComment} />
           <div className="collection-discovery-card__actions"><button className={`collection-follow-button ${subscribedCollections.includes(collection.id) ? 'is-following' : ''}`} onClick={() => onSubscribe(collection)}><Icon name="heart" size={15} />{subscribedCollections.includes(collection.id) ? 'Following' : 'Follow collection'}</button><button className="collection-discovery-card__view" onClick={() => onOpen(collection)}>View collection <Icon name="arrow" size={14} /></button></div>
         </article>)}</div> : <div className="empty-state empty-state--compact"><h3>No collections minting right now.</h3><p>Switch to All to browse every collection.</p><Button variant="outline" onClick={() => setCollectionFilter('all')}>Show all collections</Button></div>}
-      </section> : <div className="empty-state"><h3>No collections yet.</h3><p>Collections created on StellaNova will appear here.</p></div>}
+      </section> : <div className="empty-state"><h3>No collections yet.</h3><p>Collections created on NovaMarket will appear here.</p></div>}
     </div>
   )
 }
@@ -2581,7 +2632,7 @@ function FeedbackView() {
   }
   const statusLabel = (status: PublicFeedbackEntry['status']) => ({ new: 'New', planned: 'Planned', in_progress: 'In progress', done: 'Done' })[status]
   return <div className="page feedback-page">
-    <section className="page-heading"><div><span className="eyebrow">STELLANOVA · COMMUNITY</span><h1>Help shape<br /><i>what comes next.</i></h1><p>Share an idea, report a problem, or tell us what is working. Submissions are public so everyone can follow the conversation.</p></div></section>
+    <section className="page-heading"><div><span className="eyebrow">NOVAMARKET · COMMUNITY</span><h1>Help shape<br /><i>what comes next.</i></h1><p>Share an idea, report a problem, or tell us what is working. Submissions are public so everyone can follow the conversation.</p></div></section>
     <div className="feedback-layout">
       <form className="feedback-form section-block" onSubmit={(event) => void submit(event)}>
         <span className="eyebrow">YOUR FEEDBACK</span><h2>What should we know?</h2>
@@ -2680,7 +2731,7 @@ function ReferralPanel({ walletAddress }: { walletAddress: string }) {
   const share = async () => {
     if (!inviteUrl || !navigator.share) return copy()
     try {
-      await navigator.share({ title: 'Join me on StellaNova', text: 'Discover and share digital art on StellaNova.', url: inviteUrl })
+      await navigator.share({ title: 'Join me on NovaMarket', text: 'Discover and share digital art on NovaMarket.', url: inviteUrl })
       trackProductEvent('referral_link_shared')
       setMessage('Invite link shared.')
     } catch (error) {
@@ -2689,13 +2740,13 @@ function ReferralPanel({ walletAddress }: { walletAddress: string }) {
     }
   }
 
-  return <section className="section-block referral-panel"><div className="section-title"><div><span className="eyebrow">INVITE CREATORS & COLLECTORS</span><h3>Grow StellaNova together</h3></div></div><div className="referral-panel__card"><p>Invite someone to join. We count a referral as activated after their first confirmed Stellar mint or NFT collection.</p><div className="referral-panel__stats"><span><b>{summary?.referrals ?? '—'}</b><small>joined</small></span><span><b>{summary?.activated ?? '—'}</b><small>first on-chain action</small></span></div><div className="referral-panel__actions"><Button variant="outline" disabled={!summary} onClick={() => void copy()}><Icon name="copy" size={15} /> Copy invite link</Button><Button variant="primary" disabled={!summary} onClick={() => void share()}><Icon name="share" size={15} /> Share invite</Button></div>{message && <small className="referral-panel__message" role="status">{message}</small>}</div></section>
+  return <section className="section-block referral-panel"><div className="section-title"><div><span className="eyebrow">INVITE CREATORS & COLLECTORS</span><h3>Grow NovaMarket together</h3></div></div><div className="referral-panel__card"><p>Invite someone to join. We count a referral as activated after their first confirmed Stellar mint or NFT collection.</p><div className="referral-panel__stats"><span><b>{summary?.referrals ?? '—'}</b><small>joined</small></span><span><b>{summary?.activated ?? '—'}</b><small>first on-chain action</small></span></div><div className="referral-panel__actions"><Button variant="outline" disabled={!summary} onClick={() => void copy()}><Icon name="copy" size={15} /> Copy invite link</Button><Button variant="primary" disabled={!summary} onClick={() => void share()}><Icon name="share" size={15} /> Share invite</Button></div>{message && <small className="referral-panel__message" role="status">{message}</small>}</div></section>
 }
 
-function AccountView({ allNfts, ownedNfts, allCollections, posts, account, stellarWallet, walletCollections, onCopyAddress, onCreateCollection, onCreateMint, marketplace, onCancelListing, onCancelOffer, onAcceptOffer, onRejectOffer, onCounterOffer, onCounterResponse, onOpen, saved, toggleSaved, liked, disliked, onLike, onDislike, onSell, onBulkList, onCollection, onCreator, subscriptions, onSubscribe, onSaveProfile, onDisconnectWallet }: { allNfts: NFT[]; ownedNfts: NFT[]; allCollections: Collection[]; posts: PostRecord[]; account: UserAccount | null; stellarWallet: StellarWallet | null; walletCollections: WalletCollection[]; onCopyAddress: (address: string) => void; onCreateCollection: () => void; onCreateMint: () => void; marketplace: MarketplaceState | null; onCancelListing: (listingId: number, contractId?: string) => void; onCancelOffer: (offerId: number, contractId?: string) => void; onAcceptOffer: (offerId: number, contractId?: string) => void; onRejectOffer: (offerId: number, contractId?: string) => void; onCounterOffer: (offerId: number, amount: string, contractId?: string) => Promise<boolean>; onCounterResponse: (offer: MarketplaceOffer, accept: boolean) => void; onOpen: (item: NFT) => void; saved: string[]; toggleSaved: (id: string) => void; liked: string[]; disliked: string[]; onLike: (id: string) => void; onDislike: (id: string) => void; onSell: (item: NFT) => void; onBulkList: (items: { item: NFT; price: string; paymentToken: string }[]) => Promise<void>; onCollection: (item: Collection) => void; onCreator: (id: string) => void; subscriptions: string[]; onSubscribe: (collection: Collection) => void; onSaveProfile: (profile: PublicProfileInput) => Promise<void>; onDisconnectWallet: () => void | Promise<void> }) {
+function AccountView({ allNfts, ownedNfts, allCollections, posts, account, stellarWallet, walletCollections, onCopyAddress, onCreateCollection, onCreateMint, marketplace, onCancelListing, onCancelOffer, onAcceptOffer, onRejectOffer, onCounterOffer, onCounterResponse, onOpen, saved, toggleSaved, liked, disliked, onLike, onDislike, onSell, onBulkList, onCollection, onCreator, subscriptions, onSubscribe, onSaveProfile, onAuthenticate, onDisconnectWallet }: { allNfts: NFT[]; ownedNfts: NFT[]; allCollections: Collection[]; posts: PostRecord[]; account: UserAccount | null; stellarWallet: StellarWallet | null; walletCollections: WalletCollection[]; onCopyAddress: (address: string) => void; onCreateCollection: () => void; onCreateMint: () => void; marketplace: MarketplaceState | null; onCancelListing: (listingId: number, contractId?: string) => void; onCancelOffer: (offerId: number, contractId?: string) => void; onAcceptOffer: (offerId: number, contractId?: string) => void; onRejectOffer: (offerId: number, contractId?: string) => void; onCounterOffer: (offerId: number, amount: string, contractId?: string) => Promise<boolean>; onCounterResponse: (offer: MarketplaceOffer, accept: boolean) => void; onOpen: (item: NFT) => void; saved: string[]; toggleSaved: (id: string) => void; liked: string[]; disliked: string[]; onLike: (id: string) => void; onDislike: (id: string) => void; onSell: (item: NFT) => void; onBulkList: (items: { item: NFT; price: string; paymentToken: string }[]) => Promise<void>; onCollection: (item: Collection) => void; onCreator: (id: string) => void; subscriptions: string[]; onSubscribe: (collection: Collection) => void; onSaveProfile: (profile: PublicProfileInput) => Promise<void>; onAuthenticate: () => void; onDisconnectWallet: () => void | Promise<void> }) {
   const [profileSettingsOpen, setProfileSettingsOpen] = useState(false)
   if (!stellarWallet) {
-    return <div className="page"><section className="page-heading page-heading--compact"><div><span className="eyebrow">YOUR ACCOUNT</span><h1>Your gallery,<br /><i>your identity.</i></h1></div></section><div className="empty-state"><span className="empty-state__icon"><Icon name="wallet" size={24} /></span><h3>Connect to see your account.</h3><p>Connect a Stellar wallet to view your portfolio, collections and on-chain account.</p>  </div></div>
+    return <div className="page page--account"><section className="account-hero"><div className="account-hero__avatar"><Avatar src="" alt="Your profile" size="lg" ring /></div><div className="account-hero__copy"><span className="eyebrow">YOUR ACCOUNT</span><h1>Your profile</h1><p>Browse NovaMarket freely. Sign in when you’re ready to set up your profile, view your collections and NFTs, or take an action.</p></div><div className="account-hero__actions"><Button onClick={onAuthenticate}>Sign in to your account</Button></div></section><div className="empty-state"><span className="empty-state__icon"><Icon name="user" size={24} /></span><h3>Your profile and collection will appear here.</h3><p>You can explore public creators, collections and NFTs without signing in.</p></div></div>
   }
   const name = account?.creator_username ? `@${account.creator_username}` : account?.display_name || shortenStellarAddress(stellarWallet.address)
   const role = account?.is_creator ? (account?.is_verified ? 'Verified creator' : 'Creator') : 'Collector'
@@ -2721,8 +2772,10 @@ function AccountView({ allNfts, ownedNfts, allCollections, posts, account, stell
       </div>
       <div className="account-hero__actions"><Button variant="outline" onClick={() => setProfileSettingsOpen(true)}>Edit profile</Button>{stellarWallet.provider === 'Privy' && <Button variant="outline" onClick={onDisconnectWallet}>Sign out</Button>}<span className="profile-tag">{role}</span>{!account?.is_creator ? <Button onClick={onCreateCollection}><Icon name="plus" size={14} /> Create a collection</Button> : <Button variant="outline" onClick={onCreateCollection}><Icon name="plus" size={14} /> New collection</Button>}<Button variant="outline" onClick={onCreateMint}><Icon name="bookmark" size={14} /> Mint NFT</Button></div>
     </section>
+    <VerificationApplicationCard entity="user" walletAddress={stellarWallet.address} verified={verified} />
     <div className="profile-stats account-stats"><span><b>{walletCollections.length}</b><small>collections</small></span><span><b>{savedWorks.length}</b><small>saved</small></span><span><b>{followedCollections.length}</b><small>following</small></span></div>
     <ReferralPanel walletAddress={stellarWallet.address} />
+    <TradingActivityPanel walletAddress={stellarWallet.address} />
     <section className="section-block">
       <div className="section-title"><div><span className="eyebrow">YOUR NFTs</span><h3>{portfolioNfts.length ? 'Your owned NFTs' : 'No NFTs yet'}</h3></div><Button variant="quiet" onClick={onCreateMint}><Icon name="plus" size={15} /> Mint an NFT</Button></div>
       {portfolioNfts.length ? <div className="feed-grid feed-grid--account">{portfolioNfts.map((item) => {
@@ -2743,6 +2796,153 @@ function AccountView({ allNfts, ownedNfts, allCollections, posts, account, stell
     {savedWorks.length > 0 && <section className="section-block"><div className="section-title"><div><span className="eyebrow">YOUR PICKS</span><h3>Saved works</h3></div><span className="muted-note">{savedWorks.length} saved</span></div><div className="feed-grid feed-grid--account">{savedWorks.map((item) => <ArtworkCard item={item} collectionOverride={allCollections.find((collection) => collection.id === item.collectionId)} key={item.id} showReactions={false} saved onSave={() => toggleSaved(item.id)} onOpen={() => onOpen(item)} onCreator={() => undefined} onCollection={() => onCollection(allCollections.find((collection) => collection.id === item.collectionId) ?? collectionFor(item.collectionId))} liked={liked.includes(item.id)} disliked={disliked.includes(item.id)} onLike={() => onLike(item.id)} onDislike={() => onDislike(item.id)} />)}</div></section>}
     {profileSettingsOpen && <CreatorProfileSettingsModal account={account} ownedNfts={ownedNfts} posts={posts} walletCollections={walletCollections} walletAddress={stellarWallet.address} onSaveProfile={onSaveProfile} onClose={() => setProfileSettingsOpen(false)} />}
   </div>
+}
+
+function TradingActivityPanel({ walletAddress }: { walletAddress: string }) {
+  const [snapshot, setSnapshot] = useState<AccountTradingSnapshot | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState('')
+  const [reloadKey, setReloadKey] = useState(0)
+  useEffect(() => {
+    let active = true
+    setLoading(true)
+    setError('')
+    void fetchAccountTradingActivity(walletAddress).then((result) => {
+      if (active) setSnapshot(result)
+    }).catch((cause) => {
+      if (active) setError(cause instanceof Error ? cause.message : 'Trading history could not be loaded')
+    }).finally(() => { if (active) setLoading(false) })
+    return () => { active = false }
+  }, [walletAddress, reloadKey])
+  const summary = snapshot?.summary
+  const money = (value: string) => `${Number(value).toLocaleString(undefined, { maximumFractionDigits: 4 })} XLM`
+  const eventAmount = (event: AccountTradingSnapshot['activity'][number]) => {
+    if (!event.amountStroops || !event.paymentToken) return 'Amount unavailable'
+    const asset = stellarPaymentAssets.find((candidate) => candidate.contractId.toLowerCase() === event.paymentToken?.toLowerCase())
+    if (!asset) return 'Amount recorded'
+    const amount = Number(event.amountStroops) / (10 ** asset.decimals)
+    return `${amount.toLocaleString(undefined, { maximumFractionDigits: Math.min(asset.decimals, 6) })} ${asset.code}`
+  }
+  const kindLabel = (kind: AccountTradingSnapshot['activity'][number]['kind']) => kind === 'mint' ? 'Minted' : kind === 'purchase' ? 'Bought' : 'Sold'
+  return <section className="section-block trading-activity" aria-labelledby="trading-activity-title">
+    <div className="section-title"><div><span className="eyebrow">TRADING HISTORY</span><h3 id="trading-activity-title">Your market activity</h3></div>{snapshot && <span className="trading-activity__network">{snapshot.network}</span>}</div>
+    {loading && !snapshot ? <div className="trading-activity__state">Loading confirmed trades and mints…</div> : error && !snapshot ? <div className="trading-activity__state"><p>{error}</p><Button variant="outline" onClick={() => setReloadKey((key) => key + 1)}>Try again</Button></div> : summary && snapshot && <>
+      <div className="trading-activity__counts">
+        <div><small>NFTs minted</small><b>{summary.minted}</b></div>
+        <div><small>NFTs bought</small><b>{summary.purchased}</b></div>
+        <div><small>NFTs sold</small><b>{summary.sold}</b></div>
+      </div>
+      <div className="trading-activity__finance">
+        <div><small>Mint spend</small><b>{money(summary.mintSpendXlm)}</b></div>
+        <div><small>Purchase spend</small><b>{money(summary.purchaseSpendXlm)}</b></div>
+        <div><small>Sale proceeds</small><b>{money(summary.saleProceedsXlm)}</b></div>
+        <div><small>Net cash flow</small><b>{money(summary.netCashFlowXlm)}</b></div>
+        <div><small>Realized gain*</small><b>{money(summary.realizedGrossGainXlm)}</b></div>
+      </div>
+      {summary.unknownCostBasisSales > 0 && <p className="trading-activity__note">{summary.unknownCostBasisSales} sale{summary.unknownCostBasisSales === 1 ? '' : 's'} {summary.unknownCostBasisSales === 1 ? 'has' : 'have'} no tracked purchase or mint cost, so {summary.unknownCostBasisSales === 1 ? 'its' : 'their'} gain is excluded.</p>}
+      <div className="trading-activity__ledger">
+        <div className="trading-activity__ledger-heading"><b>Recent activity</b><small>{snapshot.coverage.indexedEvents} indexed events</small></div>
+        {snapshot.activity.length ? <ol>{snapshot.activity.slice(0, 12).map((event) => <li key={`${event.txHash}:${event.kind}:${event.contractId}:${event.tokenId}`}>
+          <span className={`trading-activity__kind is-${event.kind}`} aria-hidden="true">{event.kind === 'mint' ? 'M' : event.kind === 'purchase' ? 'B' : 'S'}</span>
+          <span className="trading-activity__item"><b>{kindLabel(event.kind)} · {displayNftTitle(event.title)}</b><small>Token #{event.tokenId} · {new Date(event.occurredAt).toLocaleDateString()}</small></span>
+          <span className="trading-activity__amount">{eventAmount(event)}</span>
+          <a href={`${STELLAR_EXPLORER_URL}/tx/${event.txHash}`} target="_blank" rel="noreferrer" aria-label={`View ${kindLabel(event.kind).toLowerCase()} transaction`}><Icon name="arrow" size={14} /></a>
+        </li>)}</ol> : <p className="muted-note">Confirmed mints and marketplace trades will appear here.</p>}
+      </div>
+      <p className="trading-activity__footnote">*Estimated gross gain uses tracked NovaMarket mint or purchase costs. It excludes marketplace fees and royalties. Transfers from outside NovaMarket can have unknown cost basis. {error && <span>Latest refresh failed: {error}</span>}</p>
+    </>}
+  </section>
+}
+
+function AdminDashboard({ walletAddress, isAdmin }: { walletAddress: string; isAdmin: boolean }) {
+  const [dashboard, setDashboard] = useState<AdminDashboardSnapshot | null>(null)
+  const [users, setUsers] = useState<AdminUser[]>([])
+  const [applications, setApplications] = useState<VerificationApplication[]>([])
+  const [range, setRange] = useState<'7d'|'30d'|'90d'|'all'>('30d')
+  const [status, setStatus] = useState<'pending'|'approved'|'rejected'>('pending')
+  const [entity, setEntity] = useState('')
+  const [searchDraft, setSearchDraft] = useState('')
+  const [search, setSearch] = useState('')
+  const [loading, setLoading] = useState(false)
+  const [busy, setBusy] = useState(0)
+  const [reviewNotes, setReviewNotes] = useState<Record<number,string>>({})
+  const [error, setError] = useState('')
+  const [reloadKey, setReloadKey] = useState(0)
+  useEffect(() => {
+    if (!isAdmin || !walletAddress) return
+    let active = true
+    setLoading(true)
+    setError('')
+    void Promise.all([fetchAdminAnalytics(walletAddress, range), fetchAdminVerificationApplications(walletAddress, status, entity), fetchAdminUsers(walletAddress, search)])
+      .then(([analytics, review, listedUsers]) => { if (active) { setDashboard(analytics); setApplications(review.applications); setUsers(listedUsers) } })
+      .catch((cause) => { if (active) setError(cause instanceof Error ? cause.message : 'Admin data could not be loaded') })
+      .finally(() => { if (active) setLoading(false) })
+    return () => { active = false }
+  }, [walletAddress, isAdmin, range, status, entity, search, reloadKey])
+  const review = async (application: VerificationApplication, action: 'approve'|'reject') => {
+    setBusy(application.id); setError('')
+    try { await reviewVerificationApplication(walletAddress, application.id, action, reviewNotes[application.id] ?? ''); setReloadKey((key) => key + 1) }
+    catch (cause) { setError(cause instanceof Error ? cause.message : 'Application review failed') }
+    finally { setBusy(0) }
+  }
+  if (!walletAddress) return <div className="page page--admin"><section className="admin-access"><span className="eyebrow">NOVAMARKET ADMIN</span><h1>Sign in to continue</h1><p>Sign in with one of the configured administrator accounts.</p></section></div>
+  if (!isAdmin) return <div className="page page--admin"><section className="admin-access"><span className="eyebrow">NOVAMARKET ADMIN</span><h1>Administrator access required</h1><p>This account does not have admin permissions.</p></section></div>
+  const summary = dashboard?.summary
+  const comparison = (current: number, previous: number | null | undefined) => range === 'all' ? 'All-time total' : previous == null ? 'Comparison unavailable' : previous === 0 ? current ? 'New activity' : 'No activity in either period' : `${current >= previous ? '+' : ''}${((current-previous)/previous*100).toFixed(0)}% vs prior period`
+  const kpis: [string,string,string][] = [
+    ['New accounts', (summary?.period_users ?? 0).toLocaleString(), comparison(summary?.period_users ?? 0, summary?.prior_users)],
+    ['Active transacting wallets', (summary?.active_transacting_wallets ?? 0).toLocaleString(), 'Mints or indexed sales'],
+    ['Confirmed mints', (summary?.period_mints ?? 0).toLocaleString(), comparison(summary?.period_mints ?? 0, summary?.prior_mints)],
+    ['Marketplace sales', (summary?.period_sales ?? 0).toLocaleString(), comparison(summary?.period_sales ?? 0, summary?.prior_sales)],
+    ['Sale volume', `${Number(summary?.period_volume_xlm ?? 0).toLocaleString()} XLM`, range==='all'?'All-time marketplace sales':`${Number(summary?.prior_volume_xlm ?? 0).toLocaleString()} XLM prior period`],
+    ['New collections', (summary?.period_collections ?? 0).toLocaleString(), comparison(summary?.period_collections ?? 0, summary?.prior_collections)],
+    ['Verified profiles', (summary?.verified_users ?? 0).toLocaleString(), `${summary?.creators ?? 0} creator profiles`],
+    ['Verified collections', (summary?.verified_collections ?? 0).toLocaleString(), `${summary?.pending_applications ?? 0} open applications`],
+  ]
+  const maxBar = Math.max(1, ...(dashboard?.daily ?? []).map((day) => day.mints + day.sales))
+  const periodLabels = { '7d': 'Last 7 days', '30d': 'Last 30 days', '90d': 'Last 90 days', all: 'All-time trend (90 days)' }
+  return <div className="page page--admin admin-console">
+    <header className="admin-header"><div><span className="eyebrow">NOVAMARKET · OPERATIONS</span><h1>Platform intelligence</h1><p>Product activity, verified on-chain transactions, and creator verification applications.</p><small className="admin-updated">{dashboard?.generatedAt ? `Data refreshed ${new Date(dashboard.generatedAt).toLocaleString()}` : 'Loading platform data'}</small></div><div className="admin-header__tools"><select aria-label="Analytics date range" value={range} onChange={(event) => setRange(event.target.value as typeof range)}>{Object.entries(periodLabels).map(([value,label]) => <option key={value} value={value}>{label}</option>)}</select><Button variant="outline" onClick={() => setReloadKey((key) => key + 1)} disabled={loading}>{loading ? 'Refreshing…' : 'Refresh data'}</Button></div></header>
+    {error && <div className="admin-error" role="alert">{error}</div>}
+    <section className="admin-summary admin-summary--bi" aria-label="Platform KPIs">{kpis.map(([label,value,note]) => <article key={label}><small>{label}</small><b>{value}</b><span>{note}</span></article>)}</section>
+    <section className="admin-bi-grid">
+      <article className="admin-panel admin-activity-panel"><div className="admin-panel__heading"><div><span className="eyebrow">NETWORK ACTIVITY</span><h2>Minting and marketplace trades</h2><p>Confirmed ledger-indexed events by day</p></div><span className="admin-live-mark"><i /> Stellar Testnet</span></div><div className="admin-chart" role="img" aria-label="Daily confirmed mints and marketplace sales"><div className="admin-chart__bars">{(dashboard?.daily ?? []).map((day) => <div className="admin-chart__day" key={day.day} title={`${day.day}: ${day.mints} mints, ${day.sales} sales`}><span className="admin-chart__bar admin-chart__bar--mint" style={{height:`${Math.max(day.mints ? 4 : 0, day.mints / maxBar * 100)}%`}}/><span className="admin-chart__bar admin-chart__bar--sale" style={{height:`${Math.max(day.sales ? 4 : 0, day.sales / maxBar * 100)}%`}}/></div>)}</div><div className="admin-chart__axis"><span>{dashboard?.daily[0]?.day ?? ''}</span><span>{dashboard?.daily[Math.floor((dashboard?.daily.length ?? 1)/2)]?.day ?? ''}</span><span>{dashboard?.daily?.[Math.max(0,(dashboard?.daily.length ?? 1)-1)]?.day ?? ''}</span></div><div className="admin-chart__legend"><span><i className="is-mint"/>Confirmed mints</span><span><i className="is-sale"/>Marketplace sales</span></div></div></article>
+      <article className="admin-panel admin-top-collections"><div className="admin-panel__heading"><div><span className="eyebrow">COLLECTIONS</span><h2>Most minted</h2><p>Ranked by confirmed token mints</p></div></div>{(dashboard?.topCollections ?? []).length ? <ol>{dashboard!.topCollections.map((item,index) => <li key={String(item.slug)}><span className="admin-rank">{String(index+1).padStart(2,'0')}</span><CollectionCover cover={String(item.cover ?? '')} name={String(item.name)} symbol="" className="admin-top-collection__image"/><b>{String(item.name)}</b><strong>{Number(item.confirmed_mints).toLocaleString()}<small> mints</small></strong></li>)}</ol> : <p className="admin-empty">No indexed collections yet.</p>}</article>
+    </section>
+    <section className="admin-panel admin-section admin-review-section"><div className="admin-panel__heading"><div><span className="eyebrow">CREATOR TRUST</span><h2>Verification applications</h2><p>Applications are submitted by users and collection owners from their own dashboards.</p></div><span className="admin-pending-count">{summary?.pending_applications ?? 0} pending</span></div><div className="admin-review-controls"><div className="admin-tabs" role="tablist" aria-label="Verification application status">{(['pending','approved','rejected'] as const).map((value) => <button type="button" role="tab" aria-selected={status===value} className={status===value?'is-active':''} key={value} onClick={() => setStatus(value)}>{value==='pending'?'Pending review':value==='approved'?'Approved':'Rejected'}</button>)}</div><select aria-label="Filter application type" value={entity} onChange={(event)=>setEntity(event.target.value)}><option value="">All applications</option><option value="user">User profiles</option><option value="collection">Collections</option></select></div>{applications.length ? <div className="admin-applications">{applications.map((app) => <article className="admin-application" key={app.id}><div className="admin-application__subject">{app.entity_type==='collection' ? <CollectionCover cover={app.collection_cover ?? ''} name={app.collection_name ?? 'Collection'} symbol={app.collection_symbol ?? ''} className="admin-top-collection__image"/> : <Avatar src={app.avatar ?? ''} alt={app.display_name ?? 'Applicant'} size="md" ring/>}<div><span className="admin-status">{app.entity_type==='collection'?'Collection':'User profile'} · {app.status}</span><b>{app.entity_type==='collection' ? app.collection_name : (app.display_name || app.creator_username || shortenStellarAddress(app.applicant_wallet))}</b><small>{app.email || shortenStellarAddress(app.applicant_wallet)} · applied {new Date(app.submitted_at).toLocaleDateString()}</small></div></div><p>{app.reason}</p>{app.evidence_url && <a href={app.evidence_url} target="_blank" rel="noreferrer">View supporting evidence <Icon name="arrow" size={13}/></a>}{app.review_note && <small className="admin-review-note">Review note: {app.review_note}</small>}{status==='pending' && <><label className="admin-review-note-input">Review note <textarea value={reviewNotes[app.id]??''} onChange={(event)=>setReviewNotes((current)=>({...current,[app.id]:event.target.value}))} maxLength={1000} rows={2} placeholder="Optional note, especially useful when declining"/></label><div className="admin-application__actions"><Button onClick={()=>void review(app,'approve')} disabled={busy!==0}>{busy===app.id?'Saving…':'Approve badge'}</Button><Button variant="outline" onClick={()=>void review(app,'reject')} disabled={busy!==0}>Reject</Button></div></>}</article>)}</div> : <p className="admin-empty">{loading ? 'Loading verification applications…' : status==='pending' ? 'No one has applied yet.' : `No ${status} applications.`}</p>}</section>
+    <section className="admin-bi-grid admin-bi-grid--lower"><article className="admin-panel"><div className="admin-panel__heading"><div><span className="eyebrow">MARKETPLACE</span><h2>Recent sales</h2><p>Indexed sale activity with XLM values</p></div></div>{(dashboard?.recentSales ?? []).length ? <div className="admin-sales-table"><div className="admin-sales-table__head"><span>Artwork</span><span>Buyer / seller</span><span>Price</span><span>Date</span></div>{dashboard!.recentSales.map((sale,index)=><div className="admin-sales-table__row" key={`${sale.tx_hash}-${index}`}><span><b>{String(sale.title)}</b><small>#{String(sale.token_id)}</small></span><span><small>Buyer {shortenStellarAddress(String(sale.buyer ?? ''))}</small><small>Seller {shortenStellarAddress(String(sale.seller ?? ''))}</small></span><b>{Number(sale.amount_xlm).toLocaleString()} XLM</b><small>{new Date(String(sale.created_at)).toLocaleDateString()}</small></div>)}</div>:<p className="admin-empty">No indexed sales in this period.</p>}</article><article className="admin-panel admin-directory"><div className="admin-panel__heading"><div><span className="eyebrow">ACCOUNT DIRECTORY</span><h2>Users and creators</h2><p>Search account and creation activity</p></div></div><form className="admin-user-search" onSubmit={(event)=>{event.preventDefault();setSearch(searchDraft.trim())}}><input aria-label="Search users" value={searchDraft} onChange={(event)=>setSearchDraft(event.target.value)} placeholder="Email, name, username, or wallet"/><Button variant="outline" type="submit">Search</Button></form>{users.length ? <div className="admin-user-list">{users.slice(0,8).map((user)=><article className="admin-user-card" key={user.wallet_address}><Avatar src={user.avatar} alt={user.display_name||'User'} size="sm" ring/><div className="admin-user-card__identity"><b>{user.display_name||user.creator_username||'Stellar user'} {user.is_verified&&<Verified/>}</b><small>{user.email||'Email not linked'} · {user.is_creator?'Creator':'Collector'}</small><code>{shortenStellarAddress(user.wallet_address)}</code></div><div className="admin-user-card__stats"><span>{user.collections_count} collections</span><span>{user.minted_count} mints</span></div></article>)}</div>:<p className="admin-empty">No matching user profiles.</p>}</article></section>
+    <p className="admin-footnote">Analytics use NovaMarket’s indexed account records and confirmed Stellar Testnet events. Marketplace volume excludes mint proceeds. {dashboard?.definitions.activeWallets}</p>
+  </div>
+}
+
+function VerificationApplicationCard({ entity, walletAddress, subjectId, verified }: { entity: 'user'|'collection'; walletAddress: string; subjectId?: string; verified: boolean }) {
+  const [application, setApplication] = useState<VerificationApplicationState>(null)
+  const [reason, setReason] = useState('')
+  const [evidenceUrl, setEvidenceUrl] = useState('')
+  const [open, setOpen] = useState(false)
+  const [loading, setLoading] = useState(true)
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState('')
+  useEffect(() => {
+    let active = true
+    setLoading(true)
+    void fetchVerificationApplication(walletAddress, entity, subjectId).then((result) => { if (active) setApplication(result.application) }).catch((cause) => { if (active) setError(cause instanceof Error ? cause.message : 'Could not load application status') }).finally(() => { if (active) setLoading(false) })
+    return () => { active = false }
+  }, [walletAddress, entity, subjectId])
+  if (verified) return <section className="verification-apply verification-apply--verified"><Verified/><div><b>{entity==='user'?'Your profile':'This collection'} is verified</b><small>The badge is shown publicly on NovaMarket.</small></div></section>
+  const pending = application?.status === 'pending'
+  const submit = async () => {
+    setSaving(true); setError('')
+    try { const result = await submitVerificationApplication(walletAddress, entity, { reason, evidenceUrl: evidenceUrl.trim() || undefined }, subjectId); setApplication(result.application); setOpen(false); setReason(''); setEvidenceUrl('') }
+    catch (cause) { setError(cause instanceof Error ? cause.message : 'Could not submit your application') }
+    finally { setSaving(false) }
+  }
+  return <section className="verification-apply">
+    <div className="verification-apply__intro"><span className="eyebrow">VERIFICATION</span><b>{pending ? 'Application under review' : application?.status==='rejected' ? 'You can apply again' : 'Request a verified badge'}</b><small>{pending ? `Submitted ${new Date(application.submitted_at).toLocaleDateString()}. We’ll update your badge status after review.` : entity==='user' ? 'Apply for a profile badge from your account. Add evidence that helps us confirm your public identity.' : 'Apply for this collection’s badge from its owner dashboard. User and collection badges are reviewed separately.'}</small>{application?.review_note && application.status==='rejected' && <small>Review note: {application.review_note}</small>}</div>
+    {!pending && <Button variant="outline" onClick={()=>setOpen(value=>!value)} disabled={loading}>{loading?'Loading…':open?'Close application':application?.status==='rejected'?'Apply again':'Apply for verification'}</Button>}
+    {open && !pending && <div className="verification-apply__form"><label>Why should this {entity==='user'?'profile':'collection'} be verified?<textarea value={reason} onChange={(event)=>setReason(event.target.value)} minLength={20} maxLength={2000} rows={4} placeholder="Describe the public identity, creator activity, or collection details that support your request."/><small>{reason.length}/2000 · at least 20 characters</small></label><label>Supporting link <span>optional</span><input type="url" value={evidenceUrl} onChange={(event)=>setEvidenceUrl(event.target.value)} placeholder="https://your-website-or-social-profile"/></label>{error&&<p className="admin-error" role="alert">{error}</p>}<Button onClick={()=>void submit()} disabled={saving||reason.trim().length<20}>{saving?'Submitting…':'Submit application'}</Button></div>}
+    {!open&&error&&<small className="verification-apply__error">{error}</small>}
+  </section>
 }
 
 
@@ -2805,17 +3005,22 @@ function NftArtwork({ item }: { item: NFT }) {
   const isModel = /\.(glb|gltf)$/.test(path)
   const [modelReady, setModelReady] = useState(() => typeof customElements !== 'undefined' && Boolean(customElements.get('model-viewer')))
   const [modelFailed, setModelFailed] = useState(false)
+  const [imageFailed, setImageFailed] = useState(false)
+  useEffect(() => setImageFailed(false), [item.image])
+  const artworkImage = item.image && !imageFailed
+    ? <img src={item.image} alt={item.title} onError={() => setImageFailed(true)} />
+    : <div className="nft-art-unavailable"><Icon name="image" size={28} /><span>Artwork unavailable</span></div>
   useEffect(() => {
     if (!isModel || modelReady) return
     let active = true
     import('@google/model-viewer').then(() => { if (active) setModelReady(true) }).catch(() => { if (active) setModelFailed(true) })
     return () => { active = false }
   }, [isModel, modelReady])
-  if (/\.(mp4|webm|mov)$/.test(path)) return <video src={media} poster={item.image} controls playsInline />
-  if (/\.(mp3|wav|ogg|m4a|aac)$/.test(path)) return <div className="nft-audio"><img src={item.image} alt={item.title} /><audio src={media} controls /></div>
+  if (/\.(mp4|webm|mov)$/.test(path)) return <video src={media} poster={imageFailed ? undefined : item.image} controls playsInline />
+  if (/\.(mp3|wav|ogg|m4a|aac)$/.test(path)) return <div className="nft-audio">{artworkImage}<audio src={media} controls /></div>
   if (isModel && modelReady) return createElement('model-viewer' as any, { className: 'nft-model-viewer', src: media, alt: item.title, 'camera-controls': true, 'auto-rotate': true, 'shadow-intensity': '1', 'interaction-prompt': 'auto' })
-  if (isModel) return <div className="nft-model-loading"><img src={item.image} alt={item.title} /><small>{modelFailed ? 'Interactive 3D preview failed to load.' : 'Loading interactive 3D preview…'}</small>{modelFailed && <a href={media} target="_blank" rel="noreferrer">Open model file</a>}</div>
-  return item.image ? <img src={item.image} alt={item.title} /> : <span className="artwork-unavailable">Artwork unavailable</span>
+  if (isModel) return <div className="nft-model-loading">{artworkImage}<small>{modelFailed ? 'Interactive 3D preview failed to load.' : 'Loading interactive 3D preview…'}</small>{modelFailed && <a href={media} target="_blank" rel="noreferrer">Open model file</a>}</div>
+  return artworkImage
 }
 
 function CollectionOffersPanel({ collection, items, wallet, owner, notify }: { collection: Collection; items: NFT[]; wallet: StellarWallet | null; owner: boolean; notify: (message: string) => void }) {
@@ -2976,7 +3181,7 @@ function CreatorRoyaltySettings({ collection, wallet, notify }: { collection: Co
     } catch (cause) { setMessage(cause instanceof Error ? cause.message : 'Could not save creator royalty') }
     finally { setBusy(false) }
   }
-  return <section className="section-block creator-royalty-settings"><div className="section-title"><div><span className="eyebrow">CREATOR ROYALTY</span><h3>Set your secondary-sale royalty</h3></div></div><p>Paid to your chosen wallet when a sale or accepted offer closes through the StellaNova marketplace. Maximum 10%.</p>{creatorCheck === 'checking' && <p role="status">Checking collection creator support…</p>}{creatorCheck === 'legacy' && <p role="status">This older NFT contract has no creator lookup. StellaNova will verify the collection owner from its saved creator record and register its minted tokens on the marketplace before saving.</p>}{creatorCheck === 'not-owner' && <p role="status">The connected wallet is not registered as this collection’s creator.</p>}{['supported', 'legacy'].includes(creatorCheck) && <div className="collection-offers-panel__create"><label>Basis points (100 = 1%)<input type="number" min="0" max="1000" step="1" value={bps} onChange={(event) => setBps(event.target.value)} /></label><label>Recipient wallet<input value={recipient} onChange={(event) => setRecipient(event.target.value)} /></label><Button onClick={() => void save()} disabled={busy}>{busy ? 'Saving…' : 'Save royalty'}</Button></div>}{creatorCheck === 'unavailable' && <p role="status">Could not verify this collection creator on Stellar. Retry after the Testnet RPC is available.</p>}{message && <p role="status">{message}</p>}</section>
+  return <section className="section-block creator-royalty-settings"><div className="section-title"><div><span className="eyebrow">CREATOR ROYALTY</span><h3>Set your secondary-sale royalty</h3></div></div><p>Paid to your chosen wallet when a sale or accepted offer closes through the NovaMarket marketplace. Maximum 10%.</p>{creatorCheck === 'checking' && <p role="status">Checking collection creator support…</p>}{creatorCheck === 'legacy' && <p role="status">This older NFT contract has no creator lookup. NovaMarket will verify the collection owner from its saved creator record and register its minted tokens on the marketplace before saving.</p>}{creatorCheck === 'not-owner' && <p role="status">The connected wallet is not registered as this collection’s creator.</p>}{['supported', 'legacy'].includes(creatorCheck) && <div className="collection-offers-panel__create"><label>Basis points (100 = 1%)<input type="number" min="0" max="1000" step="1" value={bps} onChange={(event) => setBps(event.target.value)} /></label><label>Recipient wallet<input value={recipient} onChange={(event) => setRecipient(event.target.value)} /></label><Button onClick={() => void save()} disabled={busy}>{busy ? 'Saving…' : 'Save royalty'}</Button></div>}{creatorCheck === 'unavailable' && <p role="status">Could not verify this collection creator on Stellar. Retry after the Testnet RPC is available.</p>}{message && <p role="status">{message}</p>}</section>
 }
 
 function DetailView({ detail, allNfts, allCollections, posts, saved, toggleSaved, openNft, onBack, onCreator, onCollection, onBuy, onOffer, comments, onComment, liked, disliked, onLike, onDislike, onSell, creatorFollows, onFollowCreator, subscribedCollections, onFollowCollection, stellarWallet, walletCollections, marketplace, onAcceptOffer, onRejectOffer, onCounterOffer, notify, setMintedNfts, onStageMintsConfirmed, onCreateCollectionPost, onCreateCollectionStory, onPostLike, onPostComment, onPostDislike, onCollectionUpdated }: { detail: Detail; allNfts: NFT[]; allCollections: Collection[]; posts: PostRecord[]; saved: string[]; toggleSaved: (id: string) => void; openNft: (item: NFT) => void; onBack: () => void; onCreator: (id: string) => void; onCollection: (item: Collection) => void; onBuy: (item: NFT) => void; onOffer: (item: NFT) => void; comments: Record<string, SocialComment[]>; onComment: (id: string, text: string, parentId?: number | string | null) => Promise<void>; liked: string[]; disliked: string[]; onLike: (id: string) => void; onDislike: (id: string) => void; onSell: (item: NFT) => void; creatorFollows: string[]; onFollowCreator: (id: string) => void; subscribedCollections: string[]; onFollowCollection: (collection: Collection) => void; stellarWallet: StellarWallet | null; walletCollections: WalletCollection[]; marketplace: MarketplaceState | null; onAcceptOffer: (offerId: number, contractId?: string) => void; onRejectOffer: (offerId: number, contractId?: string) => void; onCounterOffer: (offerId: number, amount: string, contractId?: string) => Promise<boolean | void> | boolean | void; notify: (message: string) => void; setMintedNfts: (items: MintedNft[]) => void; onStageMintsConfirmed: (inputs: MintRecordInput[]) => void; onCreateCollectionPost: (collection: Collection, caption: string, mediaUrl: string) => Promise<void>; onCreateCollectionStory: (collection: Collection, caption: string, mediaUrl: string) => Promise<void>; onPostLike: (id: number) => void; onPostComment: (id: number, text: string, parentId?: number | string | null) => Promise<void>; onPostDislike: (id: number) => void; onCollectionUpdated: (id: string, changes: Partial<Collection>) => void }) {
@@ -3043,7 +3248,27 @@ function DetailView({ detail, allNfts, allCollections, posts, saved, toggleSaved
     const collection = collectionFor(item.collectionId)
     const currentOwner = (item.ownerAddress || item.creatorId).toLowerCase()
     const relatedNfts = allNfts.filter((next) => next.id !== item.id && (next.ownerAddress || next.creatorId).toLowerCase() === currentOwner).slice(0, 3)
-    return <div className="detail-page"><button className="back-link" onClick={onBack}><Icon name="arrow" size={16} /> Back to feed</button><div className="detail-grid"><div className="detail-art"><NftArtwork item={item} /></div><div className="detail-copy"><div className="detail-kicker"><span className="eyebrow">{collection.symbol} · {item.trait}</span><CopyLinkButton path={`/nft/${encodeURIComponent(item.id)}`} label="Share NFT" /><button className={`save-button ${saved.includes(item.id) ? 'is-saved' : ''}`} onClick={() => toggleSaved(item.id)}><Icon name="bookmark" size={20} /></button></div><h1>{displayNftTitle(item.title)}</h1><button className="detail-creator" onClick={() => onCreator(creator.id)}><Avatar src={creator.avatar} alt={ownerName} size="sm" ring /><span><b>{ownerName} {creator.verified && <Verified />}</b><small>Current owner</small></span><Icon name="chevron" size={16} /></button>{artist.id && <div className="detail-artist-follow"><span>Created by <b>{artist.name}</b></span><Button variant="outline" onClick={() => onFollowCreator(artist.id)}><Icon name="heart" size={14} />{creatorFollows.includes(artist.id) ? "Following" : "Follow creator"}</Button></div>}<div className="detail-price"><span><small>{item.saleType === 'Auction' ? item.auctionEnds : item.saleType === 'Offers' ? 'Best offer' : item.saleType === 'Not listed' ? 'Sale status' : 'Current price'}</small><b>{item.saleType === 'Offers' ? item.bestOffer : item.price}</b><em>{item.priceUsd} · {item.chain}</em></span><div className="detail-actions">{isCurrentOwner ? <><span className="detail-owner-note">You own this NFT</span><Button variant="outline" onClick={() => onSell(item)}>List</Button></> : <>{item.tokenId !== undefined && item.contractId && <Button variant="outline" onClick={() => onOffer(item)}>Make offer</Button>}{item.saleType === 'Auction' || item.saleType === 'Buy now' ? <Button onClick={() => onBuy(item)}>{item.saleType === 'Auction' ? 'Place bid' : 'Buy now'} <Icon name="arrow" size={16} /></Button> : null}</>}</div></div><div className="detail-meta"><Meta label="Collection" value={collection.name} onClick={() => onCollection(collection)} /><Meta label="Token standard" value="SEP-50 NFT" />{item.rarity_rank !== null && item.rarity_rank !== undefined && <Meta label="Rarity rank" value={`#${item.rarity_rank}`} />}{item.rarity_score !== null && item.rarity_score !== undefined && <Meta label="Rarity score" value={item.rarity_score.toFixed(3)} />}{(item.attributes ?? []).map((attribute) => <Meta key={`${item.id}-${attribute.trait_type}`} label={attribute.trait_type} value={String(attribute.value)} />)}<Meta label="Owner" value={item.ownedBy} /><Meta label="Minted" value={item.minted} /><Meta label="Royalty" value={item.royalty} /><Meta label="Best offer" value={item.bestOffer ?? '—'} /></div><NftProvenance contractId={item.contractId} tokenId={item.tokenId} /><NftChainActivity contractId={item.contractId} tokenId={item.tokenId} /><SocialPanel item={item} comments={comments[item.id] ?? []} onComment={onComment} liked={liked.includes(item.id)} disliked={disliked.includes(item.id)} onLike={onLike} onDislike={onDislike} onSell={onSell} /></div></div>{matchingOffers.length > 0 && <section className="section-block detail-offers"><div className="section-title"><div><span className="eyebrow">OFFERS ON THIS NFT</span><h3>Review buyer offers</h3></div></div><div className="market-manage">{matchingOffers.map((offer) => <MarketplaceIncomingOfferRow key={`detail-offer-${offer.offer_id}`} offer={offer} onAccept={() => onAcceptOffer(offer.offer_id, offer.contract_id)} onReject={() => onRejectOffer(offer.offer_id, offer.contract_id)} onCounter={(amount) => onCounterOffer(offer.offer_id, amount, offer.contract_id)} />)}</div></section>}{relatedNfts.length > 0 && <section className="detail-more"><div className="section-title"><div><span className="eyebrow">MORE FROM {ownerName.toUpperCase()}</span><h3>Keep exploring</h3></div></div><div className="feed-grid">{relatedNfts.map((next) => <ArtworkCard item={next} key={next.id} saved={saved.includes(next.id)} onSave={() => toggleSaved(next.id)} onOpen={() => openNft(next)} onCreator={() => onCreator(next.creatorId)} onCollection={() => onCollection(collectionFor(next.collectionId))} liked={liked.includes(next.id)} disliked={disliked.includes(next.id)} onLike={() => onLike(next.id)} onDislike={() => onDislike(next.id)} />)}</div></section>}</div>
+    return <div className="detail-page">
+      <button className="back-link" onClick={onBack}><Icon name="arrow" size={16} /> Back to feed</button>
+      <div className="detail-grid">
+        <div className="detail-media-column">
+          <div className="detail-art"><NftArtwork item={item} /></div>
+          <NftProvenance contractId={item.contractId} tokenId={item.tokenId} />
+          <NftChainActivity contractId={item.contractId} tokenId={item.tokenId} />
+        </div>
+        <div className="detail-copy">
+          <div className="detail-kicker"><span className="eyebrow">{collection.symbol} · {item.trait}</span><CopyLinkButton path={`/nft/${encodeURIComponent(item.id)}`} label="Share NFT" /><button className={`save-button ${saved.includes(item.id) ? 'is-saved' : ''}`} onClick={() => toggleSaved(item.id)}><Icon name="bookmark" size={20} /></button></div>
+          <h1>{displayNftTitle(item.title)}</h1>
+          <button className="detail-creator" onClick={() => onCreator(creator.id)}><Avatar src={creator.avatar} alt={ownerName} size="sm" ring /><span><b>{ownerName} {creator.verified && <Verified />}</b><small>Current owner</small></span><Icon name="chevron" size={16} /></button>
+          {artist.id && <div className="detail-artist-follow"><span>Created by <b>{artist.name}</b></span><Button variant="outline" onClick={() => onFollowCreator(artist.id)}><Icon name="heart" size={14} />{creatorFollows.includes(artist.id) ? 'Following' : 'Follow creator'}</Button></div>}
+          <div className="detail-price"><span><small>{item.saleType === 'Auction' ? item.auctionEnds : item.saleType === 'Offers' ? 'Best offer' : item.saleType === 'Not listed' ? 'Sale status' : 'Current price'}</small><b>{item.saleType === 'Offers' ? item.bestOffer : item.price}</b><em>{item.priceUsd} · {item.chain}</em></span><div className="detail-actions">{isCurrentOwner ? <><span className="detail-owner-note">You own this NFT</span><Button variant="outline" onClick={() => onSell(item)}>List</Button></> : <>{item.tokenId !== undefined && item.contractId && <Button variant="outline" onClick={() => onOffer(item)}>Make offer</Button>}{item.saleType === 'Auction' || item.saleType === 'Buy now' ? <Button onClick={() => onBuy(item)}>{item.saleType === 'Auction' ? 'Place bid' : 'Buy now'} <Icon name="arrow" size={16} /></Button> : null}</>}</div></div>
+          <div className="detail-meta"><Meta label="Collection" value={collection.name} onClick={() => onCollection(collection)} /><Meta label="Token standard" value="SEP-50 NFT" />{item.rarity_rank !== null && item.rarity_rank !== undefined && <Meta label="Rarity rank" value={`#${item.rarity_rank}`} />}{item.rarity_score !== null && item.rarity_score !== undefined && <Meta label="Rarity score" value={item.rarity_score.toFixed(3)} />}{(item.attributes ?? []).map((attribute) => <Meta key={`${item.id}-${attribute.trait_type}`} label={attribute.trait_type} value={String(attribute.value)} />)}<Meta label="Owner" value={item.ownedBy} /><Meta label="Minted" value={item.minted} /><Meta label="Royalty" value={item.royalty} /><Meta label="Best offer" value={item.bestOffer ?? '—'} /></div>
+          <SocialPanel item={item} comments={comments[item.id] ?? []} onComment={onComment} liked={liked.includes(item.id)} disliked={disliked.includes(item.id)} onLike={onLike} onDislike={onDislike} onSell={onSell} />
+        </div>
+      </div>
+      {matchingOffers.length > 0 && <section className="section-block detail-offers"><div className="section-title"><div><span className="eyebrow">OFFERS ON THIS NFT</span><h3>Review buyer offers</h3></div></div><div className="market-manage">{matchingOffers.map((offer) => <MarketplaceIncomingOfferRow key={`detail-offer-${offer.offer_id}`} offer={offer} onAccept={() => onAcceptOffer(offer.offer_id, offer.contract_id)} onReject={() => onRejectOffer(offer.offer_id, offer.contract_id)} onCounter={(amount) => onCounterOffer(offer.offer_id, amount, offer.contract_id)} />)}</div></section>}
+      {relatedNfts.length > 0 && <section className="detail-more"><div className="section-title"><div><span className="eyebrow">MORE FROM {ownerName.toUpperCase()}</span><h3>Keep exploring</h3></div></div><div className="feed-grid">{relatedNfts.map((next) => <ArtworkCard item={next} key={next.id} saved={saved.includes(next.id)} onSave={() => toggleSaved(next.id)} onOpen={() => openNft(next)} onCreator={() => onCreator(next.creatorId)} onCollection={() => onCollection(collectionFor(next.collectionId))} liked={liked.includes(next.id)} disliked={disliked.includes(next.id)} onLike={() => onLike(next.id)} onDislike={() => onDislike(next.id)} />)}</div></section>}
+    </div>
   }
   if (detail.type === 'creator') {
     const creator = publicCreatorProfile ? creatorFromPublicProfile(publicCreatorProfile) : creatorFor(detail.id, creatorProfiles)
@@ -3069,6 +3294,7 @@ function DetailView({ detail, allNfts, allCollections, posts, saved, toggleSaved
       <div className="collection-detail-header__copy"><span className="eyebrow">{collection.isSample ? 'SAMPLE COLLECTION · STELLAR TESTNET' : 'STELLAR TESTNET COLLECTION'}{collection.symbol ? ` · ${collection.symbol}` : ''}</span><h1>{collection.name}</h1><button className="creator-link" onClick={() => onCreator(creator.id)}><Avatar src={creator.avatar} alt={creator.name} size="xs" />by {creator.name} <Icon name="arrow" size={13} /></button></div>
     </section>
     <div className="collection-share-row"><p className="collection-description">{collection.description}</p><div className="collection-share-actions"><CopyLinkButton path={`/collection/${encodeURIComponent(collection.id)}`} label="Share collection" />{!isOwner && <Button variant="outline" onClick={() => onFollowCollection(collection)}><Icon name="heart" size={14} />{subscribedCollections.includes(collection.id) ? 'Following' : 'Follow collection'}</Button>}</div></div>
+    {isOwner && stellarWallet && <VerificationApplicationCard entity="collection" walletAddress={stellarWallet.address} subjectId={collection.id} verified={walletCollections.some((owned) => owned.slug === collection.id && owned.is_verified)} />}
     <nav className="collection-page-nav" aria-label="Collection sections"><a href="#collection-artwork">Artwork <span>{collectionItems.length}</span></a><a href="#collection-mint">Mint</a><a href="#collection-offers">Offers</a><a href="#collection-updates">Updates</a></nav>
     <section className="collection-items collection-page-panel" id="collection-artwork">
       <div className="section-title"><div><span className="eyebrow">BROWSE THE SET</span><h3>All works</h3></div><span className="muted-note">{filteredCollectionItems.length} of {collectionItems.length} NFTs</span></div>
@@ -3178,6 +3404,39 @@ function SocialPanel({ item, comments, onComment, liked, disliked, onLike, onDis
   const [draft, setDraft] = useState('')
   return <section className="social-panel"><div className="social-panel__actions"><button className={liked ? 'is-active-up' : ''} aria-label="Thumbs up" onClick={() => onLike(item.id)}><Icon name="thumbUp" size={17} /> {item.likes}</button><button className={disliked ? 'is-active-down' : ''} aria-label="Thumbs down" onClick={() => onDislike(item.id)}><Icon name="thumbDown" size={17} /></button><button onClick={() => document.getElementById('comment-input')?.focus()}><Icon name="comment" size={17} /> {comments.length || item.comments} comments</button><Button variant="quiet" onClick={() => onSell(item)}>Sell</Button></div><ThreadedCommentList comments={comments} onReply={(parentId, text) => onComment(item.id, text, parentId)} /><form onSubmit={async (event) => { event.preventDefault(); if (!draft.trim()) return; await onComment(item.id, draft); setDraft('') }}><input id="comment-input" value={draft} onChange={(event) => setDraft(event.target.value)} placeholder="Add a comment…" aria-label="Add a comment" /><button type="submit">Post</button></form></section>}
 
+function renderPostCaption(caption: string) {
+  const urlPattern = /(https?:\/\/[^\s<>"']+|www\.[^\s<>"']+)/gi
+  const parts: React.ReactNode[] = []
+  let cursor = 0
+  for (const match of caption.matchAll(urlPattern)) {
+    const raw = match[0]
+    const index = match.index ?? 0
+    let urlText = raw
+    let trailing = ''
+    while (/[.,!?;:]$/.test(urlText)) {
+      trailing = urlText.slice(-1) + trailing
+      urlText = urlText.slice(0, -1)
+    }
+    if (!urlText) continue
+    if (index > cursor) parts.push(caption.slice(cursor, index))
+    const href = urlText.startsWith('www.') ? `https://${urlText}` : urlText
+    try {
+      const parsed = new URL(href)
+      if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
+        parts.push(<a key={`post-link-${index}`} href={parsed.href} target="_blank" rel="noopener noreferrer" onClick={(event) => event.stopPropagation()}>{urlText}</a>)
+      } else {
+        parts.push(urlText)
+      }
+    } catch {
+      parts.push(urlText)
+    }
+    if (trailing) parts.push(trailing)
+    cursor = index + raw.length
+  }
+  if (cursor < caption.length) parts.push(caption.slice(cursor))
+  return parts
+}
+
 function PostCard({ post, allNfts = [], onLike, onDislike, disliked, onComment, onTipPost, onOpenNft, onCreator, onCollection, collections: availableCollections = [], walletAddress = '', onBuyNft, onOfferNft }: { post: PostRecord; allNfts?: NFT[]; onLike: (id: number) => void; onDislike: (id: number) => void; disliked: boolean; onComment: (id: number, text: string, parentId?: number | string | null) => Promise<void>; onTipPost?: (id: number, recipient: string, amount: string, onProgress: (stage: 'preparing' | 'awaiting-wallet' | 'confirming') => void) => Promise<{ hash: string; amount: string; tipsCount?: number }>; onOpenNft: (nftId: string) => void; onCreator: (creatorId: string) => void; onCollection?: (collection: Collection) => void; collections?: Collection[]; walletAddress?: string; onBuyNft?: (item: NFT) => void; onOfferNft?: (item: NFT) => void }) {
   const linked = post.linked_nft_id ? [...allNfts, ...nfts].find((n) => n.id === post.linked_nft_id) : undefined
   const isLinkedNftOwner = Boolean(linked?.ownerAddress && walletAddress && linked.ownerAddress.toLowerCase() === walletAddress.toLowerCase())
@@ -3205,7 +3464,7 @@ function PostCard({ post, allNfts = [], onLike, onDislike, disliked, onComment, 
       }} />}<span className="post-card__media-fallback" aria-hidden="true"><Icon name="spark" size={22} /><b>Media unavailable</b></span></div>}
       {post.author_type === 'collection' ? <span className="post-card__kind is-collection"><Icon name="grid" size={12} /> Collection update</span> : post.post_kind === 'drop' && <span className="post-card__kind is-drop"><Icon name="bookmark" size={12} /> Drop announcement</span>}
       <div className="post-card__body">
-        {post.caption && <p>{post.caption}</p>}
+        {post.caption && <p>{renderPostCaption(post.caption)}</p>}
         {post.post_kind === 'drop' && linked ? (
           <div className="post-card__drop"><img src={linked.image} alt={linked.title} /><span><b>{linked.title}</b><small>{post.price_xlm ? `${Number(post.price_xlm).toFixed(2)} XLM` : linked.saleType} · announcement</small><FeedNftMarketButtons item={linked} isOwner={isLinkedNftOwner} onOpen={() => onOpenNft(linked.id)} onBuy={onBuyNft ? () => onBuyNft(linked) : undefined} onOffer={onOfferNft ? () => onOfferNft(linked) : undefined} /></span></div>
         ) : linked ? (
@@ -3260,7 +3519,7 @@ function TipPostDialog({ post, recipient, onClose, onSubmit }: { post: PostRecor
       </> : <>
         <span className="eyebrow">SUPPORT THE ARTIST</span>
         <h2 id={`tip-title-${post.id}`}>Tip this artwork</h2>
-        <p>Your XLM goes directly from your wallet to the creator. StellaNova takes no fee.</p>
+        <p>Your XLM goes directly from your wallet to the creator. NovaMarket takes no fee.</p>
         <div className="tip-modal__art"><Avatar src={post.avatar} alt={publicPostAuthorName(post)} size="sm" /><span><b>{publicPostAuthorName(post)}</b><small>{post.caption || 'Shared artwork'}</small></span></div>
         <div className="tip-modal__presets" aria-label="Suggested tip amounts">{['1', '5', '10'].map((value) => <button key={value} type="button" className={amount === value ? 'is-active' : ''} onClick={() => setAmount(value)} disabled={busy}>{value} XLM</button>)}</div>
         <label className="tip-modal__amount">Custom amount in XLM<input className="offer-input" inputMode="decimal" type="text" value={amount} onChange={(event) => setAmount(event.target.value)} disabled={busy} placeholder="1.00" /></label>
@@ -3317,8 +3576,8 @@ function SharePostButton({ post }: { post: PostRecord }) {
   const [copied, setCopied] = useState(false)
   const share = async () => {
     const url = createTrackedShareUrl(`/post/${post.id}`, 'post', String(post.id))
-    const title = `${publicPostAuthorName(post)} on StellaNova`
-    const text = post.caption?.trim() || `View ${publicPostAuthorName(post)}'s post on StellaNova.`
+    const title = `${publicPostAuthorName(post)} on NovaMarket`
+    const text = post.caption?.trim() || `View ${publicPostAuthorName(post)}'s post on NovaMarket.`
     try {
       if (navigator.share) await navigator.share({ title, text, url })
       else if (navigator.clipboard?.writeText) {
@@ -3337,7 +3596,7 @@ function ShareNftButton({ item }: { item: NFT }) {
   const [copied, setCopied] = useState(false)
   const share = async () => {
     const url = createTrackedShareUrl(`/nft/${encodeURIComponent(item.id)}`, 'nft', item.id)
-    const text = `View ${item.title} on StellaNova.`
+    const text = `View ${item.title} on NovaMarket.`
     try {
       if (navigator.share) await navigator.share({ title: item.title, text, url })
       else if (navigator.clipboard?.writeText) {
@@ -3491,7 +3750,7 @@ function WalletDetailsModal({ wallet, onClose }: { wallet: StellarWallet; onClos
   </section></div>
 }
 
-function WalletModal({ item, mode, auction, wallet, emailSignIn, emailReady, onClose, onConnect, onConnectFreighter, onPurchase, actionStatus, actionError }: { item: NFT | null; mode: WalletMode; auction: MarketplaceAuction | null; wallet: StellarWallet | null; emailSignIn: boolean; emailReady: boolean; onClose: () => void; onConnect: () => void | Promise<void>; onConnectFreighter: () => void | Promise<void>; onPurchase: (amount?: string, durationHours?: string, minIncrement?: string, paymentToken?: string) => void; actionStatus: WalletActionStatus; actionError: string }) {
+function WalletModal({ item, mode, auction, wallet, emailSignIn, emailReady, lastAuthMethod, onClose, onConnect, onConnectFreighter, onConnectMetaMask, showMetaMask, onPurchase, actionStatus, actionError }: { item: NFT | null; mode: WalletMode; auction: MarketplaceAuction | null; wallet: StellarWallet | null; emailSignIn: boolean; emailReady: boolean; lastAuthMethod: LastAuthMethod | null; onClose: () => void; onConnect: () => void | Promise<void>; onConnectFreighter: () => void | Promise<void>; onConnectMetaMask: () => void | Promise<void>; showMetaMask: boolean; onPurchase: (amount?: string, durationHours?: string, minIncrement?: string, paymentToken?: string) => void; actionStatus: WalletActionStatus; actionError: string }) {
   const [paymentToken, setPaymentToken] = useState(auction?.payment_token ?? sorobanMarketplaceConfig.paymentToken ?? stellarPaymentAssets[0].contractId)
   const selectedAsset = stellarPaymentAssets.find((asset) => asset.contractId === (mode === 'bid' && auction ? auction.payment_token : paymentToken)) ?? stellarPaymentAssets[0]
   const [amount, setAmount] = useState(mode === 'bid' && auction ? formatTokenAmount((BigInt(auction.highest_bid || '0') + BigInt(auction.min_increment || '0')).toString(), selectedAsset.decimals) : item?.bestOffer?.replace(' XLM', '') ?? '1')
@@ -3526,7 +3785,7 @@ function WalletModal({ item, mode, auction, wallet, emailSignIn, emailReady, onC
 
         {progressMessage && <p className="offer-progress" role="status" aria-live="polite"><span className="offer-progress-spinner" aria-hidden="true" />{progressMessage}</p>}
         {actionStatus === 'error' && actionError && <p className="offer-progress offer-progress--error" role="alert">{actionError}</p>}
-      </div> : <div className="connect-stack"><p>{emailSignIn ? 'Sign up or sign in with your email. StellaNova will create your Stellar wallet automatically.' : 'Connect a Stellar wallet to get started.'}</p>{emailSignIn && <Button onClick={onConnect} disabled={!emailReady}>{emailReady ? <>Continue with email <Icon name="arrow" size={15} /></> : 'Loading email sign-in…'}</Button>}<Button variant={emailSignIn ? 'outline' : 'primary'} onClick={onConnectFreighter}>{emailSignIn ? 'I already have Freighter' : 'Connect Freighter'} <Icon name="arrow" size={15} /></Button></div>}
+      </div> : <div className="connect-stack"><p>{emailSignIn ? 'Sign up or sign in with your email. NovaMarket will create your Stellar wallet automatically.' : 'Connect a Stellar wallet to get started.'}</p>{emailSignIn && <Button onClick={onConnect} disabled={!emailReady}><span>Continue with email</span>{lastAuthMethod === 'email' && <small className="auth-last-used">Last used</small>}{emailReady && <Icon name="arrow" size={15} />}</Button>}<Button variant={emailSignIn ? 'outline' : 'primary'} onClick={onConnectFreighter}><span>{emailSignIn ? 'I already have Freighter' : 'Connect Freighter'}</span>{lastAuthMethod === 'Freighter' && <small className="auth-last-used">Last used</small>}<Icon name="arrow" size={15} /></Button>{showMetaMask && <Button variant="outline" onClick={onConnectMetaMask}><span>Connect MetaMask</span>{lastAuthMethod === 'MetaMask' && <small className="auth-last-used">Last used</small>}<Icon name="arrow" size={15} /></Button>}{!showMetaMask && <small className="wallet-footnote">MetaMask Stellar signing is currently Mainnet-only. NovaMarket is on Testnet.</small>}</div>}
       {!complete && <small className="wallet-footnote">Your email identifies your account; it is never used as your wallet key.</small>}
     </div>
   </div>
@@ -3768,6 +4027,7 @@ function CollectionDropSetup({ collection, wallet, onClose, onLaunched, notify }
     }
     setBusy(true); setMessage('Publishing your drop to Stellar Testnet… approve each wallet transaction when prompted.')
     try {
+      const { getRarityTierSchedule, getRarityTierCounts, seededShuffle } = await import('./ai-collection-studio')
       const masterArtworkExpansion = draft.masterArtworkExpansion === true
       const fullSupply = Number(collection.totalSupply ?? draft.stages.reduce((sum, stage) => sum + (stage.maxSupply ?? 0), 0))
       if (!Number.isSafeInteger(fullSupply) || fullSupply < 1 || (masterArtworkExpansion && fullSupply > 10000)) throw new Error(masterArtworkExpansion ? 'This studio currently supports up to 10,000 editions with individual rarity metadata.' : 'The collection supply is invalid.')
@@ -3926,7 +4186,7 @@ function NftProvenance({ contractId, tokenId }: { contractId?: string; tokenId?:
   const hash = (value: string | null) => value ? <code title={value}>{value}</code> : <span>Not recorded</span>
   const rows = record ? [
     ...(record.creator_wallet ? [{ label: 'Creator wallet', value: <code title={record.creator_wallet}>{shortenStellarAddress(record.creator_wallet)}</code> }] : []),
-    ...(record.creation_method ? [{ label: 'Creation workflow', value: <span>{({ 'pixel-studio': 'Pixel Studio', 'ai-studio': 'AI Art Studio', 'ai-collection-studio': 'AI Collection Studio', 'painter-studio': 'Painter & Mural Studio', 'collage-studio': 'Poster & Collage Studio', 'collection-settings': 'Collection mint setup', 'quick-mint': 'Quick mint', 'creator-import': 'Creator import' } as Record<string, string>)[record.creation_method] ?? 'StellaNova creator flow'}</span> }] : []),
+    ...(record.creation_method ? [{ label: 'Creation workflow', value: <span>{({ 'pixel-studio': 'Pixel Studio', 'ai-studio': 'AI Art Studio', 'ai-collection-studio': 'AI Collection Studio', 'painter-studio': 'Painter & Mural Studio', 'collage-studio': 'Poster & Collage Studio', 'collection-settings': 'Collection mint setup', 'quick-mint': 'Quick mint', 'creator-import': 'Creator import' } as Record<string, string>)[record.creation_method] ?? 'NovaMarket creator flow'}</span> }] : []),
     { label: 'Minted by', value: <code title={record.minter}>{shortenStellarAddress(record.minter)}</code> },
     { label: record.asset_sha256_verified ? 'Artwork · SHA-256 (server verified)' : 'Artwork · SHA-256 (unverified)', value: hash(record.asset_sha256) },
     ...(record.animation_sha256 ? [{ label: record.animation_sha256_verified ? 'Animation · SHA-256 (server verified)' : 'Animation · SHA-256 (unverified)', value: hash(record.animation_sha256) }] : []),
@@ -3937,7 +4197,7 @@ function NftProvenance({ contractId, tokenId }: { contractId?: string; tokenId?:
   ] : []
   return <section className="nft-provenance" aria-label="NFT provenance record">
     <div className="section-title"><div><span className="eyebrow">ORIGIN RECORD</span><h3>Artwork provenance</h3></div></div>
-    <p>Creator metadata and the confirmed Stellar mint are recorded here. Artwork fingerprints are marked when StellaNova independently verified the uploaded bytes. A fingerprint identifies file bytes; it does not establish copyright or authorship.</p>
+    <p>Creator metadata and the confirmed Stellar mint are recorded here. Artwork fingerprints are marked when NovaMarket independently verified the uploaded bytes. A fingerprint identifies file bytes; it does not establish copyright or authorship.</p>
     {loading ? <p className="muted-note">Loading provenance record…</p> : error ? <p className="muted-note">Provenance details could not be loaded right now.</p> : rows.length ? <dl>{rows.map((row) => <div key={row.label}><dt>{row.label}</dt><dd>{row.value}</dd></div>)}</dl> : <p className="muted-note">No confirmed mint record is available yet.</p>}
   </section>
 }

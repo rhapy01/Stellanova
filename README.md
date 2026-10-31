@@ -1,6 +1,6 @@
-# StellaNova
+# NovaMarket
 
-StellaNova is a social-first NFT marketplace and creator platform built on Stellar and Soroban. It combines a social feed and collection discovery with tools for creating, minting, and managing digital collectibles.
+NovaMarket is a social-first NFT marketplace and creator platform built on Stellar and Soroban. It combines a social feed and collection discovery with tools for creating, minting, and managing digital collectibles.
 
 > **Network status:** The current application and deployed contracts target Stellar Testnet. Treat it as a development product; do not use it to custody or transact with real-value assets.
 
@@ -48,13 +48,17 @@ The unauthenticated `/api/health/live` and `/api/health/ready` routes are minima
 
 ## Deployment
 
-The repository includes Vercel configuration. To enable continuous deployment, connect this GitHub repository to the StellaNova Vercel project and configure deployment environment variables from `.env.example` in Vercel’s protected settings. Vercel Git integration can then build and deploy pushes according to the project’s branch settings. Do not commit `.env`, `.env.local`, deployment credentials, or `.vercel/` state.
+The repository includes Vercel configuration. To enable continuous deployment, connect this GitHub repository to the NovaMarket Vercel project and configure deployment environment variables from `.env.example` in Vercel’s protected settings. Vercel Git integration can then build and deploy pushes according to the project’s branch settings. Do not commit `.env`, `.env.local`, deployment credentials, or `.vercel/` state.
 
 Testnet contract build and deployment scripts are available as npm scripts. They require the Stellar CLI and a Testnet deployer secret. Review the scripts and target network before running them.
 
 ## Security
 
 Read [SECURITY.md](SECURITY.md) for current controls, known security gaps, and responsible vulnerability reporting. Never submit real wallet secrets, API tokens, or production credentials.
+
+## Product and developer documentation
+
+The GitBook-ready documentation source is in [`gitbook/`](gitbook/README.md). It covers the product, creator workflows, marketplace, Stellar architecture, local development, security, and deployment. Connect that folder to GitBook with Git Sync to publish it as a docs space.
 
 ## License
 

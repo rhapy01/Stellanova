@@ -81,6 +81,23 @@ export async function ensureSchema() {
     await db.query(`CREATE TABLE IF NOT EXISTS nftgram_schema (version INT PRIMARY KEY, applied_at TIMESTAMPTZ DEFAULT now())`)
     const currentSchema = await db.query<{ version: number }>('SELECT COALESCE(MAX(version), 0)::int AS version FROM nftgram_schema')
     const currentVersion = Number(currentSchema.rows[0]?.version ?? 0)
+    // Verification applications were added after the numbered migrations.
+    // Keep them available before version-based early returns on existing DBs.
+    if (currentVersion >= 23) {
+      await db.query(`ALTER TABLE collections ADD COLUMN IF NOT EXISTS is_verified BOOLEAN NOT NULL DEFAULT FALSE`)
+      await db.query(`ALTER TABLE collections ADD COLUMN IF NOT EXISTS verification_status VARCHAR(16) NOT NULL DEFAULT 'unverified'`)
+      await db.query(`ALTER TABLE collections ALTER COLUMN verification_status SET DEFAULT 'unverified'`)
+      await db.query(`ALTER TABLE collections ADD COLUMN IF NOT EXISTS verified_by VARCHAR(56)`)
+      await db.query(`ALTER TABLE collections ADD COLUMN IF NOT EXISTS verified_at TIMESTAMPTZ`)
+      await db.query(`ALTER TABLE user_profiles ADD COLUMN IF NOT EXISTS is_verified BOOLEAN NOT NULL DEFAULT FALSE`)
+      await db.query(`ALTER TABLE user_profiles ADD COLUMN IF NOT EXISTS email VARCHAR(320)`)
+      await db.query(`ALTER TABLE user_profiles ADD COLUMN IF NOT EXISTS creator_username VARCHAR(24)`)
+      await db.query(`CREATE TABLE IF NOT EXISTS verification_applications (id BIGSERIAL PRIMARY KEY, entity_type VARCHAR(16) NOT NULL CHECK (entity_type IN ('user','collection')), subject_id VARCHAR(160) NOT NULL, applicant_wallet VARCHAR(56) NOT NULL, reason VARCHAR(2000) NOT NULL DEFAULT '', evidence_url VARCHAR(2048), status VARCHAR(16) NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','approved','rejected')), submitted_at TIMESTAMPTZ NOT NULL DEFAULT now(), reviewed_at TIMESTAMPTZ, reviewed_by VARCHAR(56), review_note VARCHAR(1000))`)
+      await db.query(`CREATE INDEX IF NOT EXISTS verification_applications_status_submitted ON verification_applications (status, submitted_at DESC)`)
+      await db.query(`CREATE INDEX IF NOT EXISTS verification_applications_subject ON verification_applications (entity_type, LOWER(subject_id), submitted_at DESC)`)
+      await db.query(`CREATE UNIQUE INDEX IF NOT EXISTS verification_applications_one_pending ON verification_applications (entity_type, LOWER(subject_id)) WHERE status='pending'`)
+      await db.query(`UPDATE collections c SET verification_status='unverified' WHERE c.verification_status='pending' AND c.is_verified=FALSE AND NOT EXISTS (SELECT 1 FROM verification_applications a WHERE a.entity_type='collection' AND LOWER(a.subject_id)=LOWER(c.slug) AND a.status='pending')`)
+    }
     // A collection may be associated with both its legacy NFT contract and a
     // replacement contract. Keep this registry available on databases that
     // already reached the current schema version before the table was added.
@@ -226,6 +243,10 @@ export async function ensureSchema() {
       `CREATE TABLE IF NOT EXISTS marketplace_events (id BIGSERIAL PRIMARY KEY, event_key VARCHAR(255) NOT NULL UNIQUE, event_type VARCHAR(64) NOT NULL, contract_id VARCHAR(56) NOT NULL, tx_hash VARCHAR(64) NOT NULL, ledger INT NOT NULL, payload JSONB NOT NULL, created_at TIMESTAMPTZ DEFAULT now())`,
       `CREATE TABLE IF NOT EXISTS indexer_state (name VARCHAR(64) PRIMARY KEY, next_ledger INT NOT NULL, updated_at TIMESTAMPTZ DEFAULT now())`,
       `CREATE INDEX IF NOT EXISTS events_ledger ON marketplace_events (ledger)`,
+      `CREATE INDEX IF NOT EXISTS marketplace_events_sales_buyer ON marketplace_events (LOWER(COALESCE(payload->'value'->>1, '')), ledger) WHERE event_type IN ('sale', 'offer_s', 'c_sale', 't_sale', 'auc_s')`,
+      `CREATE INDEX IF NOT EXISTS marketplace_events_sales_seller ON marketplace_events (LOWER(COALESCE(payload->'value'->>2, '')), ledger) WHERE event_type IN ('sale', 'offer_s', 'c_sale', 't_sale', 'auc_s')`,
+      `CREATE INDEX IF NOT EXISTS verified_nft_mints_minter_ledger ON verified_nft_mints (LOWER(minter), ledger)`,
+      `CREATE INDEX IF NOT EXISTS stage_mint_events_wallet_ledger ON stage_mint_events (LOWER(wallet), ledger)`,
       `CREATE TABLE IF NOT EXISTS canonical_metadata (token_id INT PRIMARY KEY, contract_id VARCHAR(56) NOT NULL, object_key VARCHAR(512) NOT NULL, metadata_uri VARCHAR(1024) NOT NULL, sha256 VARCHAR(64) NOT NULL, content_type VARCHAR(128) NOT NULL, bytes INT NOT NULL, created_at TIMESTAMPTZ DEFAULT now(), updated_at TIMESTAMPTZ DEFAULT now())`,
       `DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'canonical_metadata_contract_id_token_id_pkey') THEN ALTER TABLE canonical_metadata DROP CONSTRAINT IF EXISTS canonical_metadata_pkey; ALTER TABLE canonical_metadata ADD CONSTRAINT canonical_metadata_contract_id_token_id_pkey PRIMARY KEY (contract_id, token_id); END IF; END $$`,
       `CREATE TABLE IF NOT EXISTS token_collections (contract_id VARCHAR(56) NOT NULL, token_id INT NOT NULL, collection_id VARCHAR(128) NOT NULL, created_at TIMESTAMPTZ DEFAULT now(), PRIMARY KEY (contract_id, token_id))`,
@@ -258,7 +279,7 @@ export async function ensureSchema() {
       `CREATE TABLE IF NOT EXISTS user_profiles (wallet_address VARCHAR(56) PRIMARY KEY, display_name VARCHAR(80) NOT NULL DEFAULT '', avatar VARCHAR(512) NOT NULL DEFAULT '', bio VARCHAR(500) NOT NULL DEFAULT '', is_creator BOOLEAN NOT NULL DEFAULT FALSE, is_admin BOOLEAN NOT NULL DEFAULT FALSE, is_verified BOOLEAN NOT NULL DEFAULT FALSE, created_at TIMESTAMPTZ DEFAULT now(), updated_at TIMESTAMPTZ DEFAULT now())`,
       `ALTER TABLE user_profiles ADD COLUMN IF NOT EXISTS welcome_email_sent_at TIMESTAMPTZ`,
       `UPDATE user_profiles SET welcome_email_sent_at = now() WHERE welcome_email_sent_at IS NULL`,
-      `CREATE TABLE IF NOT EXISTS collections (id BIGSERIAL PRIMARY KEY, owner_wallet VARCHAR(56) NOT NULL, slug VARCHAR(160) NOT NULL, name VARCHAR(160) NOT NULL, symbol VARCHAR(20) NOT NULL, description VARCHAR(1000) NOT NULL DEFAULT '', cover VARCHAR(1024) NOT NULL DEFAULT '', is_verified BOOLEAN NOT NULL DEFAULT FALSE, verification_status VARCHAR(16) NOT NULL DEFAULT 'pending', verified_by VARCHAR(56), verified_at TIMESTAMPTZ, contract_id VARCHAR(56), created_at TIMESTAMPTZ DEFAULT now(), UNIQUE (slug))`,
+      `CREATE TABLE IF NOT EXISTS collections (id BIGSERIAL PRIMARY KEY, owner_wallet VARCHAR(56) NOT NULL, slug VARCHAR(160) NOT NULL, name VARCHAR(160) NOT NULL, symbol VARCHAR(20) NOT NULL, description VARCHAR(1000) NOT NULL DEFAULT '', cover VARCHAR(1024) NOT NULL DEFAULT '', is_verified BOOLEAN NOT NULL DEFAULT FALSE, verification_status VARCHAR(16) NOT NULL DEFAULT 'unverified', verified_by VARCHAR(56), verified_at TIMESTAMPTZ, contract_id VARCHAR(56), created_at TIMESTAMPTZ DEFAULT now(), UNIQUE (slug))`,
       `CREATE INDEX IF NOT EXISTS collections_owner ON collections (owner_wallet)`,
       `ALTER TABLE collections ADD COLUMN IF NOT EXISTS contract_id VARCHAR(56)`,
       `CREATE TABLE IF NOT EXISTS collection_nft_contracts (collection_slug VARCHAR(160) NOT NULL, contract_id VARCHAR(56) NOT NULL, is_active BOOLEAN NOT NULL DEFAULT FALSE, created_at TIMESTAMPTZ NOT NULL DEFAULT now(), PRIMARY KEY (collection_slug, contract_id))`,
@@ -297,6 +318,12 @@ export async function ensureSchema() {
       `CREATE INDEX IF NOT EXISTS mint_whitelist_wallet ON mint_whitelist (wallet)`,
       `ALTER TABLE collections ADD COLUMN IF NOT EXISTS is_verified BOOLEAN NOT NULL DEFAULT FALSE`,
       `ALTER TABLE collections ADD COLUMN IF NOT EXISTS verification_status VARCHAR(16) NOT NULL DEFAULT 'pending'`,
+      `ALTER TABLE collections ALTER COLUMN verification_status SET DEFAULT 'unverified'`,
+      `CREATE TABLE IF NOT EXISTS verification_applications (id BIGSERIAL PRIMARY KEY, entity_type VARCHAR(16) NOT NULL CHECK (entity_type IN ('user','collection')), subject_id VARCHAR(160) NOT NULL, applicant_wallet VARCHAR(56) NOT NULL, reason VARCHAR(2000) NOT NULL DEFAULT '', evidence_url VARCHAR(2048), status VARCHAR(16) NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','approved','rejected')), submitted_at TIMESTAMPTZ NOT NULL DEFAULT now(), reviewed_at TIMESTAMPTZ, reviewed_by VARCHAR(56), review_note VARCHAR(1000))`,
+      `CREATE INDEX IF NOT EXISTS verification_applications_status_submitted ON verification_applications (status, submitted_at DESC)`,
+      `CREATE INDEX IF NOT EXISTS verification_applications_subject ON verification_applications (entity_type, LOWER(subject_id), submitted_at DESC)`,
+      `CREATE UNIQUE INDEX IF NOT EXISTS verification_applications_one_pending ON verification_applications (entity_type, LOWER(subject_id)) WHERE status='pending'`,
+      `UPDATE collections c SET verification_status='unverified' WHERE c.verification_status='pending' AND c.is_verified=FALSE AND NOT EXISTS (SELECT 1 FROM verification_applications a WHERE a.entity_type='collection' AND LOWER(a.subject_id)=LOWER(c.slug) AND a.status='pending')`,
       `ALTER TABLE collections ADD COLUMN IF NOT EXISTS verified_by VARCHAR(56)`,
       `ALTER TABLE collections ADD COLUMN IF NOT EXISTS verified_at TIMESTAMPTZ`,
       `ALTER TABLE user_profiles ADD COLUMN IF NOT EXISTS is_verified BOOLEAN NOT NULL DEFAULT FALSE`,
