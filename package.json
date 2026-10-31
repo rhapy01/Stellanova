@@ -29,7 +29,7 @@
     "@privy-io/react-auth": "^3.48.1",
     "@stellar/freighter-api": "^6.0.1",
     "@stellar/stellar-sdk": "^17.2.1",
-    "@stripe/stripe-js": "^10.0.0",
+    "@stripe/stripe-js": "^10.2.0",
     "@vitejs/plugin-react": "latest",
     "dotenv": "^18.0.6",
     "express": "^5.2.1",
